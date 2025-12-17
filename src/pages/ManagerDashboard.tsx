@@ -2,13 +2,15 @@ import { useState } from 'react'
 import { useAuth } from '../contexts/AuthContext'
 import { useNavigate, Link } from 'react-router-dom'
 import EmployeesPage from './EmployeesPage'
+import ClientsPage from './ClientsPage'
+import CalendarPage from './CalendarPage'
 import './ManagerDashboard.css'
 import './AdminDashboard.css'
 
 export default function ManagerDashboard() {
   const { user, authUser, signOut } = useAuth()
   const navigate = useNavigate()
-  const [activeTab, setActiveTab] = useState<'employees'>('employees')
+  const [activeTab, setActiveTab] = useState<'employees' | 'clients' | 'calendar'>('employees')
   const [sidebarOpen, setSidebarOpen] = useState(false)
 
   const handleSignOut = async () => {
@@ -94,6 +96,36 @@ export default function ManagerDashboard() {
                 </svg>
                 <span>Співробітники</span>
               </button>
+              <button
+                className={`sidebar-nav-item ${activeTab === 'clients' ? 'active' : ''}`}
+                onClick={() => {
+                  setActiveTab('clients')
+                  setSidebarOpen(false)
+                }}
+              >
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
+                  <circle cx="8.5" cy="7" r="4"></circle>
+                  <path d="M20 8v6"></path>
+                  <path d="M23 11h-6"></path>
+                </svg>
+                <span>Клієнти</span>
+              </button>
+              <button
+                className={`sidebar-nav-item ${activeTab === 'calendar' ? 'active' : ''}`}
+                onClick={() => {
+                  setActiveTab('calendar')
+                  setSidebarOpen(false)
+                }}
+              >
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect>
+                  <line x1="16" y1="2" x2="16" y2="6"></line>
+                  <line x1="8" y1="2" x2="8" y2="6"></line>
+                  <line x1="3" y1="10" x2="21" y2="10"></line>
+                </svg>
+                <span>Календар</span>
+              </button>
             </nav>
           </div>
         </>
@@ -102,6 +134,8 @@ export default function ManagerDashboard() {
       <div className="admin-dashboard-content">
         <div className="tab-content">
           {activeTab === 'employees' && <EmployeesPage />}
+          {activeTab === 'clients' && <ClientsPage />}
+          {activeTab === 'calendar' && <CalendarPage />}
         </div>
       </div>
     </div>
