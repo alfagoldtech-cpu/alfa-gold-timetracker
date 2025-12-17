@@ -85,6 +85,45 @@
   transform: translateY(0);
 }
 
+.btn-primary:disabled,
+.btn-primary.disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  pointer-events: none;
+  transform: none;
+}
+
+.btn-primary:disabled:hover,
+.btn-primary.disabled:hover {
+  transform: none;
+  box-shadow: 0 4px 12px rgba(255, 107, 53, 0.3);
+}
+
+.btn-primary:disabled::before,
+.btn-primary.disabled::before {
+  display: none;
+}
+
+.btn-danger {
+  background: linear-gradient(135deg, #f56565 0%, #e53e3e 100%);
+  color: white;
+}
+
+.btn-danger:hover {
+  background: linear-gradient(135deg, #e53e3e 0%, #c53030 100%);
+  box-shadow: 0 6px 20px rgba(229, 62, 62, 0.4);
+}
+
+.btn-success {
+  background: linear-gradient(135deg, #48bb78 0%, #38a169 100%);
+  color: white;
+}
+
+.btn-success:hover {
+  background: linear-gradient(135deg, #38a169 0%, #2f855a 100%);
+  box-shadow: 0 6px 20px rgba(72, 187, 120, 0.4);
+}
+
 .btn-primary svg {
   width: 18px;
   height: 18px;

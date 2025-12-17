@@ -1,10 +1,15 @@
+import { useState } from 'react'
 import { useAuth } from '../contexts/AuthContext'
 import { useNavigate, Link } from 'react-router-dom'
+import EmployeesPage from './EmployeesPage'
 import './ManagerDashboard.css'
+import './AdminDashboard.css'
 
 export default function ManagerDashboard() {
   const { user, authUser, signOut } = useAuth()
   const navigate = useNavigate()
+  const [activeTab, setActiveTab] = useState<'employees'>('employees')
+  const [sidebarOpen, setSidebarOpen] = useState(false)
 
   const handleSignOut = async () => {
     try {
@@ -22,13 +27,22 @@ export default function ManagerDashboard() {
   }
 
   return (
-    <div className="manager-dashboard">
-      <header className="manager-dashboard-header">
+    <div className="admin-dashboard">
+      <header className="admin-dashboard-header">
         <div className="header-left">
+          <button 
+            className="menu-toggle"
+            onClick={() => setSidebarOpen(!sidebarOpen)}
+            aria-label="Відкрити меню"
+          >
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <line x1="3" y1="12" x2="21" y2="12"></line>
+              <line x1="3" y1="6" x2="21" y2="6"></line>
+              <line x1="3" y1="18" x2="21" y2="18"></line>
+            </svg>
+          </button>
           <h1>AlfaGold Time Tracker</h1>
-          <span className="user-info">
-            {getFullName()} ({authUser?.email})
-          </span>
+          <span className="user-email">{authUser?.email}</span>
         </div>
         <div className="header-right">
           <Link
@@ -46,22 +60,48 @@ export default function ManagerDashboard() {
         </div>
       </header>
 
-      <div className="manager-dashboard-content">
-        <div className="welcome-section">
-          <h2>Вітаємо, {getFullName()}!</h2>
-          <p className="subtitle">Керівник виробництва</p>
-        </div>
-
-        <div className="dashboard-cards">
-          <div className="dashboard-card">
-            <h3>Мій проект</h3>
-            <p>Інформація про ваш проект буде тут</p>
+      {/* Sidebar Navigation */}
+      {sidebarOpen && (
+        <>
+          <div className="sidebar-overlay" onClick={() => setSidebarOpen(false)}></div>
+          <div className="sidebar-nav">
+            <div className="sidebar-nav-header">
+              <h2>Меню</h2>
+              <button 
+                className="sidebar-close"
+                onClick={() => setSidebarOpen(false)}
+                aria-label="Закрити меню"
+              >
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <line x1="18" y1="6" x2="6" y2="18"></line>
+                  <line x1="6" y1="6" x2="18" y2="18"></line>
+                </svg>
+              </button>
+            </div>
+            <nav className="sidebar-nav-menu">
+              <button
+                className={`sidebar-nav-item ${activeTab === 'employees' ? 'active' : ''}`}
+                onClick={() => {
+                  setActiveTab('employees')
+                  setSidebarOpen(false)
+                }}
+              >
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
+                  <circle cx="9" cy="7" r="4"></circle>
+                  <path d="M23 21v-2a4 4 0 0 0-3-3.87"></path>
+                  <path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
+                </svg>
+                <span>Співробітники</span>
+              </button>
+            </nav>
           </div>
+        </>
+      )}
 
-          <div className="dashboard-card">
-            <h3>Статистика</h3>
-            <p>Статистика роботи буде тут</p>
-          </div>
+      <div className="admin-dashboard-content">
+        <div className="tab-content">
+          {activeTab === 'employees' && <EmployeesPage />}
         </div>
       </div>
     </div>
