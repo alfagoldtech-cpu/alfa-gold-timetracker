@@ -1,0 +1,155 @@
+.manager-dashboard {
+  min-height: 100vh;
+  background: #f7fafc;
+}
+
+.manager-dashboard-header {
+  background: white;
+  padding: 20px 40px;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.header-left h1 {
+  margin: 0;
+  font-size: 24px;
+  color: #2d3748;
+}
+
+.user-info {
+  font-size: 14px;
+  color: #718096;
+  margin-top: 4px;
+  display: block;
+}
+
+.header-right {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+.btn-link {
+  padding: 10px 20px;
+  background: #4299e1;
+  color: white;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 16px;
+  font-weight: 600;
+  text-decoration: none;
+  transition: background 0.2s;
+}
+
+.btn-link:hover {
+  background: #3182ce;
+}
+
+.btn-logout {
+  padding: 10px 20px;
+  background: #ff6b35;
+  color: white;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 16px;
+  font-weight: 600;
+  transition: background 0.2s;
+}
+
+.btn-logout:hover {
+  background: #e55a2b;
+}
+
+.manager-dashboard-content {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 40px;
+}
+
+.welcome-section {
+  background: white;
+  padding: 40px;
+  border-radius: 12px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  margin-bottom: 32px;
+  text-align: center;
+}
+
+.welcome-section h2 {
+  margin: 0 0 8px 0;
+  font-size: 32px;
+  color: #2d3748;
+}
+
+.subtitle {
+  margin: 0;
+  font-size: 18px;
+  color: #718096;
+}
+
+.dashboard-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 24px;
+}
+
+.dashboard-card {
+  background: white;
+  padding: 32px;
+  border-radius: 12px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  transition: transform 0.2s, box-shadow 0.2s;
+}
+
+.dashboard-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+.dashboard-card h3 {
+  margin: 0 0 16px 0;
+  font-size: 20px;
+  color: #2d3748;
+}
+
+.dashboard-card p {
+  margin: 0;
+  color: #718096;
+  font-size: 16px;
+}
+
+@media (max-width: 768px) {
+  .manager-dashboard-header {
+    padding: 16px 20px;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 12px;
+  }
+
+  .header-right {
+    width: 100%;
+    flex-direction: column;
+  }
+
+  .btn-link,
+  .btn-logout {
+    width: 100%;
+  }
+
+  .manager-dashboard-content {
+    padding: 20px;
+  }
+
+  .welcome-section {
+    padding: 24px;
+  }
+
+  .dashboard-cards {
+    grid-template-columns: 1fr;
+  }
+}
+

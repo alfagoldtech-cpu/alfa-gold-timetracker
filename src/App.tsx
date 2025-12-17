@@ -3,7 +3,9 @@ import { AuthProvider, useAuth } from './contexts/AuthContext'
 import LoginPage from './pages/LoginPage'
 import ChangePasswordPage from './pages/ChangePasswordPage'
 import ResetPasswordPage from './pages/ResetPasswordPage'
-import Dashboard from './pages/Dashboard'
+import AdminDashboard from './pages/AdminDashboard'
+import ManagerDashboard from './pages/ManagerDashboard'
+import ProjectViewPage from './pages/ProjectViewPage'
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   try {
@@ -33,6 +35,36 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
     console.error('Error in ProtectedRoute:', error)
     return <Navigate to="/login" replace />
   }
+}
+
+function DashboardRoute() {
+  const { user, loading } = useAuth()
+
+  if (loading) {
+    return (
+      <div style={{ 
+        display: 'flex', 
+        justifyContent: 'center', 
+        alignItems: 'center', 
+        height: '100vh',
+        fontSize: '18px',
+        color: '#2d3748'
+      }}>
+        Завантаження...
+      </div>
+    )
+  }
+
+  // role_id 1 = Адміністратор
+  // role_id 2 = Керівник виробництва
+  if (user?.role_id === 1) {
+    return <AdminDashboard />
+  } else if (user?.role_id === 2) {
+    return <ManagerDashboard />
+  }
+
+  // Якщо роль не визначена, показуємо дашборд керівника виробництва за замовчуванням
+  return <ManagerDashboard />
 }
 
 function LoginRoute() {
@@ -67,7 +99,15 @@ function AppRoutes() {
         path="/dashboard" 
         element={
           <ProtectedRoute>
-            <Dashboard />
+            <DashboardRoute />
+          </ProtectedRoute>
+        } 
+      />
+      <Route 
+        path="/projects/:id" 
+        element={
+          <ProtectedRoute>
+            <ProjectViewPage />
           </ProtectedRoute>
         } 
       />

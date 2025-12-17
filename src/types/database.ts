@@ -36,6 +36,24 @@ export interface User {
   updated_at: string
 }
 
+export interface Department {
+  id: number
+  department_name: string
+  project_id: number
+  created_at: string
+  updated_at: string
+}
+
+export interface UserDepartment {
+  user_id: number
+  department_id: number
+  created_at: string
+}
+
+export interface UserWithDepartments extends User {
+  departments?: Department[]
+}
+
 export interface Database {
   public: {
     Tables: {
@@ -53,6 +71,16 @@ export interface Database {
         Row: User
         Insert: Omit<User, 'id' | 'created_at' | 'updated_at' | 'date_added'>
         Update: Partial<Omit<User, 'id' | 'created_at' | 'updated_at' | 'date_added'>>
+      }
+      departments: {
+        Row: Department
+        Insert: Omit<Department, 'id' | 'created_at' | 'updated_at'>
+        Update: Partial<Omit<Department, 'id' | 'created_at' | 'updated_at'>>
+      }
+      user_departments: {
+        Row: UserDepartment
+        Insert: Omit<UserDepartment, 'created_at'>
+        Update: Partial<Omit<UserDepartment, 'created_at'>>
       }
     }
   }
