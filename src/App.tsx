@@ -1,5 +1,5 @@
 import { useEffect } from 'react'
-import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom'
+import { BrowserRouter as Router, Routes, Route, Navigate, useLocation } from 'react-router-dom'
 import { AuthProvider, useAuth } from './contexts/AuthContext'
 import { supabase } from './lib/supabase'
 import LoginPage from './pages/LoginPage'
@@ -12,20 +12,43 @@ import ClientViewPage from './pages/ClientViewPage'
 import LoadingSpinner from './components/LoadingSpinner'
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
-  try {
-    const { authUser, loading } = useAuth()
+  const location = useLocation()
+  const { authUser, loading } = useAuth()
 
+  // Зберігаємо поточний URL в sessionStorage при зміні локації
+  useEffect(() => {
+    if (authUser && location.pathname !== '/login' && location.pathname !== '/') {
+      // Зберігаємо поточний URL для можливості повернення після оновлення
+      const currentUrl = location.pathname + location.search
+      sessionStorage.setItem('returnUrl', currentUrl)
+    }
+  }, [location.pathname, location.search, authUser])
+
+  try {
+    // Показуємо спінер під час завантаження
     if (loading) {
       return <LoadingSpinner />
     }
 
+    // Якщо користувач не авторизований, зберігаємо поточний URL і перенаправляємо на login
     if (!authUser) {
+      // Зберігаємо поточний URL перед перенаправленням на login
+      const currentPath = location.pathname + location.search
+      if (currentPath !== '/login' && currentPath !== '/') {
+        sessionStorage.setItem('returnUrl', currentPath)
+      }
       return <Navigate to="/login" replace />
     }
 
+    // Якщо користувач авторизований, показуємо дочірній компонент
     return <>{children}</>
   } catch (error) {
     console.error('Error in ProtectedRoute:', error)
+    // Зберігаємо поточний URL перед перенаправленням на login
+    const currentPath = location.pathname + location.search
+    if (currentPath !== '/login' && currentPath !== '/') {
+      sessionStorage.setItem('returnUrl', currentPath)
+    }
     return <Navigate to="/login" replace />
   }
 }
@@ -91,9 +114,28 @@ function LoginRoute() {
     return <LoadingSpinner />
   }
 
-  // Якщо користувач авторизований і це не вихід, перенаправляємо на дашборд
+  // Якщо користувач авторизований і це не вихід
   if (authUser) {
-    return <Navigate to="/dashboard" replace />
+    // Перевіряємо, чи є збережений URL для повернення (з ProtectedRoute)
+    const returnUrl = sessionStorage.getItem('returnUrl')
+    if (returnUrl && returnUrl !== '/login' && returnUrl !== '/dashboard' && returnUrl !== '/') {
+      sessionStorage.removeItem('returnUrl')
+      // Перенаправляємо на збережений URL
+      return <Navigate to={returnUrl} replace />
+    }
+    // Якщо немає збереженого URL або це /login, перенаправляємо на дашборд
+    // Але тільки якщо користувач дійсно на сторінці входу (не редирект)
+    // Перевіряємо, чи це навмисний перехід на /login (немає returnUrl або returnUrl = /login)
+    const isIntentionalLogin = !returnUrl || returnUrl === '/login' || returnUrl === '/'
+    if (isIntentionalLogin) {
+      // Очищаємо returnUrl, якщо він є
+      if (returnUrl) {
+        sessionStorage.removeItem('returnUrl')
+      }
+      return <Navigate to="/dashboard" replace />
+    }
+    // Якщо є returnUrl, але він не оброблений вище, залишаємо на login
+    // (це не повинно статися в нормальних умовах)
   }
 
   return <LoginPage />

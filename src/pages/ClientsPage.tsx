@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useMemo } from 'react'
 import { useAuth } from '../contexts/AuthContext'
 import { useNavigate } from 'react-router-dom'
 import { 
@@ -70,6 +70,9 @@ export default function ClientsPage() {
   const [selectedTaskDates, setSelectedTaskDates] = useState<Array<{ month: number; date: string; executorId: number; isActive: boolean }>>([])
   const [expandedAssignedTaskGroups, setExpandedAssignedTaskGroups] = useState<Set<string>>(new Set())
   const [editingAssignedTaskId, setEditingAssignedTaskId] = useState<number | null>(null)
+  const isUpdatingRef = useRef<boolean>(false)
+  const previousExecutorValuesRef = useRef<Map<number, number>>(new Map())
+  const editingTaskIdRef = useRef<number | null>(null)
 
   const [clientForm, setClientForm] = useState({
     edrpou: '',
@@ -750,15 +753,16 @@ export default function ClientsPage() {
     }
   }
 
-  // Групуємо призначені задачі по базовій назві
-  const groupAssignedTasksByName = (tasks: AssignedTaskWithDetails[]): Map<string, AssignedTaskWithDetails[]> => {
+  // Групуємо призначені задачі по базовій назві та сортуємо за planned_date
+  const groupedTasks = useMemo(() => {
     const grouped = new Map<string, AssignedTaskWithDetails[]>()
     
-    if (!tasks || tasks.length === 0) {
+    if (!assignedTasks || assignedTasks.length === 0) {
       return grouped
     }
     
-    tasks.forEach(task => {
+    // Спочатку групуємо задачі
+    assignedTasks.forEach(task => {
       const baseName = task.task ? getBaseTaskName(task.task.task_name) : `Задача #${task.task_id}`
       if (!grouped.has(baseName)) {
         grouped.set(baseName, [])
@@ -766,8 +770,29 @@ export default function ClientsPage() {
       grouped.get(baseName)!.push(task)
     })
     
+    // Потім сортуємо задачі всередині кожної групи за planned_date (від першого до останнього місяця)
+    // Створюємо нові масиви замість мутації існуючих
+    grouped.forEach((groupTasks, baseName) => {
+      const sorted = [...groupTasks].sort((a, b) => {
+        const dateA = a.task?.planned_date
+        const dateB = b.task?.planned_date
+        
+        // Якщо немає дати, ставимо в кінець
+        if (!dateA && !dateB) return 0
+        if (!dateA) return 1
+        if (!dateB) return -1
+        
+        // Порівнюємо дати
+        const parsedDateA = new Date(dateA)
+        const parsedDateB = new Date(dateB)
+        
+        return parsedDateA.getTime() - parsedDateB.getTime()
+      })
+      grouped.set(baseName, sorted)
+    })
+    
     return grouped
-  }
+  }, [assignedTasks])
 
   const toggleAssignedTaskGroup = (baseName: string) => {
     setExpandedAssignedTaskGroups(prev => {
@@ -781,84 +806,180 @@ export default function ClientsPage() {
     })
   }
 
-  const handleUpdateExecutor = async (taskId: number, executorId: number) => {
+  const handleUpdateExecutor = async (taskId: number, executorId: number | null) => {
     if (!selectedClientForTasks) return
     
-    // Знаходимо задачу для перевірки
-    const taskToUpdate = assignedTasks.find(t => t.id === taskId)
-    if (!taskToUpdate) {
-      console.error('Задачу не знайдено для оновлення:', taskId)
+    // Якщо вже виконується оновлення, ігноруємо повторні виклики
+    if (isUpdatingRef.current) {
+      console.log('Оновлення вже виконується, ігноруємо виклик для taskId:', taskId)
       return
     }
     
+    // Якщо executorId === 0, це означає "-- Оберіть виконавця --", встановлюємо null
+    const finalExecutorId = executorId === 0 ? null : executorId
+    
+    // Знаходимо задачу для перевірки - використовуємо строгу перевірку
+    const taskToUpdate = assignedTasks.find(t => t.id === taskId)
+    if (!taskToUpdate) {
+      console.error('Задачу не знайдено для оновлення:', taskId, 'Доступні ID:', assignedTasks.map(t => t.id))
+      return
+    }
+    
+    // Перевіряємо, чи значення реально змінилося
+    const currentExecutorId = taskToUpdate.executor_id || null
+    if (currentExecutorId === finalExecutorId) {
+      console.log('Значення не змінилося, ігноруємо оновлення для задачі:', taskId, 'executorId:', finalExecutorId)
+      return
+    }
+    
+    console.log('Оновлюємо задачу:', {
+      taskId,
+      currentExecutorId: taskToUpdate.executor_id,
+      newExecutorId: finalExecutorId,
+      currentGroupId: taskToUpdate.group_id
+    })
+    
     // Зберігаємо початковий стан для відкату
     const originalExecutorId = taskToUpdate.executor_id
+    const originalGroupId = taskToUpdate.group_id
+    
+    // Встановлюємо прапорець, що оновлення виконується
+    isUpdatingRef.current = true
+    
+    // Зберігаємо поточний editingAssignedTaskId перед будь-якими змінами (з ref для надійності)
+    const currentEditingId = editingTaskIdRef.current ?? editingAssignedTaskId
+    console.log('Зберігаємо editingAssignedTaskId перед оновленням:', currentEditingId, 'для задачі:', taskId, 'ref:', editingTaskIdRef.current)
     
     try {
-      // Оптимістичне оновлення тільки для конкретної задачі
-      setAssignedTasks(prev => prev.map(task => {
-        if (task.id === taskId) {
-          return { ...task, executor_id: executorId || null }
+      // Отримуємо group_id з виконавця (якщо виконавець обрано)
+      let executorGroupId: number | null = null
+      if (finalExecutorId) {
+        const executor = availableExecutors.find(e => e.id === finalExecutorId)
+        if (executor) {
+          executorGroupId = executor.group_id || null
+          console.log(`Отримано group_id ${executorGroupId} з виконавця ${finalExecutorId}`)
+        } else {
+          console.warn('Виконавець не знайдено в availableExecutors:', finalExecutorId)
         }
-        return task
-      }))
+      } else {
+        // Якщо виконавець видаляється, group_id також має бути null
+        executorGroupId = null
+        console.log('Видаляємо виконавця, встановлюємо group_id в null')
+      }
       
-      const success = await updateAssignedTask(taskId, { executor_id: executorId || null })
+      // Оптимістичне оновлення тільки для конкретної задачі з строгою перевіркою ID
+      setAssignedTasks(prev => {
+        const updated = prev.map(task => {
+          // Використовуємо строгу перевірку === для уникнення плутанини
+          if (task.id === taskId) {
+            console.log('Оновлюємо задачу в стані:', task.id, '->', finalExecutorId)
+            return { 
+              ...task, 
+              executor_id: finalExecutorId,
+              group_id: executorGroupId
+            }
+          }
+          return task
+        })
+        console.log('Оновлено задач у стані:', updated.filter(t => t.id === taskId).length, 'з', updated.length)
+        return updated
+      })
+      
+      // Оновлюємо в БД: executor_id та group_id
+      const updateData: { executor_id: number | null; group_id?: number | null } = { 
+        executor_id: finalExecutorId,
+        group_id: executorGroupId
+      }
+      
+      console.log('Відправляємо оновлення в БД для taskId:', taskId, 'дані:', updateData)
+      const success = await updateAssignedTask(taskId, updateData)
+      
       if (!success) {
+        console.error('Помилка оновлення задачі в БД:', taskId)
         // Якщо помилка - відкатуємо зміни
         setAssignedTasks(prev => prev.map(task => {
           if (task.id === taskId) {
-            return { ...task, executor_id: originalExecutorId }
+            return { 
+              ...task, 
+              executor_id: originalExecutorId,
+              group_id: originalGroupId
+            }
           }
           return task
         }))
         setError('Не вдалося оновити виконавця')
+      } else {
+        console.log('Успішно оновлено задачу в БД:', taskId)
+        // previousExecutorValuesRef вже оновлено синхронно перед оновленням стану
+        
+        // Не перезавантажуємо дані з сервера, оскільки ми вже оновили задачу локально
+        // Це запобігає зміні порядку задач і зміщенню редагування
+        
+        // Скидаємо прапорець після завершення оновлення
+        isUpdatingRef.current = false
       }
-      // Якщо успішно - залишаємо оптимістичне оновлення, не перезавантажуємо всі задачі
     } catch (err: any) {
+      console.error('Помилка в handleUpdateExecutor:', err)
       // Відкатуємо зміни при помилці
       setAssignedTasks(prev => prev.map(task => {
         if (task.id === taskId) {
-          return { ...task, executor_id: originalExecutorId }
+          return { 
+            ...task, 
+            executor_id: originalExecutorId,
+            group_id: originalGroupId
+          }
         }
         return task
       }))
       setError('Не вдалося оновити виконавця')
-      console.error(err)
+      // Скидаємо прапорець при помилці
+      isUpdatingRef.current = false
     }
   }
 
   const handleToggleTaskActive = async (taskId: number, currentStatus: boolean) => {
     if (!selectedClientForTasks) return
     
-    // Знаходимо задачу для перевірки
+    console.log('handleToggleTaskActive викликано для taskId:', taskId, 'currentStatus:', currentStatus, 'поточний editingAssignedTaskId:', editingAssignedTaskId)
+    
+    // Знаходимо задачу для перевірки - використовуємо строгу перевірку
     const taskToUpdate = assignedTasks.find(t => t.id === taskId)
     if (!taskToUpdate) {
-      console.error('Задачу не знайдено для оновлення:', taskId)
+      console.error('Задачу не знайдено для оновлення:', taskId, 'Доступні ID:', assignedTasks.map(t => t.id))
       return
     }
     
     const newStatus = !currentStatus
+    console.log('Змінюємо статус задачі:', {
+      taskId,
+      currentStatus,
+      newStatus
+    })
+    
+    // Зберігаємо поточний editingAssignedTaskId перед будь-якими змінами (з ref для надійності)
+    const currentEditingId = editingTaskIdRef.current ?? editingAssignedTaskId
+    console.log('Зберігаємо editingAssignedTaskId перед оновленням:', currentEditingId, 'для задачі:', taskId, 'ref:', editingTaskIdRef.current)
     
     try {
-      // Оптимістичне оновлення тільки для конкретної задачі
-      setAssignedTasks(prev => prev.map(task => {
-        if (task.id === taskId) {
-          return { ...task, is_active: newStatus }
-        }
-        return task
-      }))
+      // Оптимістичне оновлення тільки для конкретної задачі з строгою перевіркою ID
+      setAssignedTasks(prev => {
+        const updated = prev.map(task => {
+          // Використовуємо строгу перевірку === для уникнення плутанини
+          if (task.id === taskId) {
+            console.log('Оновлюємо статус задачі в стані:', task.id, '->', newStatus)
+            return { ...task, is_active: newStatus }
+          }
+          return task
+        })
+        console.log('Оновлено задач у стані:', updated.filter(t => t.id === taskId).length, 'з', updated.length)
+        return updated
+      })
       
+      console.log('Відправляємо оновлення статусу в БД для taskId:', taskId, 'is_active:', newStatus)
       const success = await updateAssignedTask(taskId, { is_active: newStatus })
-      if (success) {
-        // Оновлюємо кількість задач у списку клієнтів
-        const tasksCount = await getActiveAssignedTasksCountForClients([selectedClientForTasks.id])
-        setClients(prev => prev.map(client => 
-          client.id === selectedClientForTasks.id 
-            ? { ...client, activeTasksCount: tasksCount.get(selectedClientForTasks.id) || 0 }
-            : client
-        ))
-      } else {
+      
+      if (!success) {
+        console.error('Помилка оновлення статусу задачі в БД:', taskId)
         // Якщо помилка - відкатуємо зміни
         setAssignedTasks(prev => prev.map(task => {
           if (task.id === taskId) {
@@ -867,8 +988,19 @@ export default function ClientsPage() {
           return task
         }))
         setError('Не вдалося змінити статус задачі')
+      } else {
+        console.log('Успішно оновлено статус задачі в БД:', taskId)
+        // Не перезавантажуємо дані з сервера, оскільки ми вже оновили задачу локально
+        // Це запобігає зміні порядку задач і зміщенню редагування
+        
+        // Оновлюємо кількість активних задач у списку клієнтів
+        const tasksCount = await getActiveAssignedTasksCountForClients([selectedClientForTasks.id])
+        setClients(prev => prev.map(client => 
+          client.id === selectedClientForTasks.id 
+            ? { ...client, activeTasksCount: tasksCount.get(selectedClientForTasks.id) || 0 }
+            : client
+        ))
       }
-      // Якщо успішно - залишаємо оптимістичне оновлення, не перезавантажуємо всі задачі
     } catch (err: any) {
       // Відкатуємо зміни при помилці
       setAssignedTasks(prev => prev.map(task => {
@@ -886,8 +1018,10 @@ export default function ClientsPage() {
     try {
       const success = await updateAssignedTask(taskId, { task_status: status || null })
       if (success && selectedClientForTasks) {
-        const updated = await getAssignedTasksByClient(selectedClientForTasks.id)
-        setAssignedTasks(updated)
+        // Оновлюємо тільки конкретну задачу локально, не перезавантажуючи всі дані
+        setAssignedTasks(prev => prev.map(task => 
+          task.id === taskId ? { ...task, task_status: status || null } : task
+        ))
       }
     } catch (err: any) {
       setError('Не вдалося оновити статус задачі')
@@ -900,8 +1034,10 @@ export default function ClientsPage() {
       const isoDate = date ? parseDateToISO(date) : null
       const success = await updateAssignedTask(taskId, { completion_date: isoDate || null })
       if (success && selectedClientForTasks) {
-        const updated = await getAssignedTasksByClient(selectedClientForTasks.id)
-        setAssignedTasks(updated)
+        // Оновлюємо тільки конкретну задачу локально, не перезавантажуючи всі дані
+        setAssignedTasks(prev => prev.map(task => 
+          task.id === taskId ? { ...task, completion_date: isoDate || null } : task
+        ))
       }
     } catch (err: any) {
       setError('Не вдалося оновити дату виконання')
@@ -913,8 +1049,10 @@ export default function ClientsPage() {
     try {
       const success = await updateAssignedTask(taskId, { completion_time_minutes: minutes })
       if (success && selectedClientForTasks) {
-        const updated = await getAssignedTasksByClient(selectedClientForTasks.id)
-        setAssignedTasks(updated)
+        // Оновлюємо тільки конкретну задачу локально, не перезавантажуючи всі дані
+        setAssignedTasks(prev => prev.map(task => 
+          task.id === taskId ? { ...task, completion_time_minutes: minutes } : task
+        ))
       }
     } catch (err: any) {
       setError('Не вдалося оновити час виконання')
@@ -982,11 +1120,14 @@ export default function ClientsPage() {
       // Створюємо призначені задачі для кожної дати з відповідною task_id
       const tasksToCreate = selectedTaskDates.map((dateItem) => {
         const relatedTask = relatedTasks.find(t => t.planned_date.split('T')[0] === dateItem.date)
+        // Для тім ліда group_id = user.id (ID тім ліда)
+        // Для інших ролей group_id = user.group_id (якщо є)
+        const groupId = isTeamLead ? user?.id : (user?.group_id || null)
         return {
           task_id: relatedTask?.id || selectedTaskId,
           client_id: selectedClientForTasks.id,
           department_id: selectedClientForTasks.departments?.[0]?.id || null,
-          group_id: user?.group_id || null,
+          group_id: groupId,
           executor_id: dateItem.executorId || null,
           is_active: dateItem.isActive
         }
@@ -1986,7 +2127,7 @@ export default function ClientsPage() {
                                   
                                   return (
                                     <div
-                                      key={assigned.id}
+                                      key={`assigned-task-${assigned.id}`}
                                       style={{
                                         padding: '16px',
                                         border: '1px solid #e2e8f0',
@@ -2000,11 +2141,16 @@ export default function ClientsPage() {
                                     >
                                       {/* Кнопка редагування */}
                                       <button
-                                        onClick={() => {
+                                        onClick={(e) => {
+                                          e.stopPropagation()
                                           if (isEditing) {
+                                            console.log('Закриваємо редагування для задачі:', assigned.id)
                                             setEditingAssignedTaskId(null)
+                                            editingTaskIdRef.current = null
                                           } else {
+                                            console.log('Відкриваємо редагування для задачі:', assigned.id)
                                             setEditingAssignedTaskId(assigned.id)
+                                            editingTaskIdRef.current = assigned.id
                                           }
                                         }}
                                         style={{
@@ -2060,12 +2206,30 @@ export default function ClientsPage() {
                                         {/* Виконавець */}
                                         {isEditing ? (
                                           <select
-                                            key={`executor-select-${assigned.id}`}
+                                            key={`executor-select-${assigned.id}-${assigned.executor_id || 'null'}`}
                                             value={assigned.executor_id || 0}
                                             onChange={(e) => {
                                               e.stopPropagation()
+                                              e.preventDefault()
+                                              
+                                              // Якщо вже виконується оновлення, ігноруємо
+                                              if (isUpdatingRef.current) {
+                                                console.log('Оновлення вже виконується, ігноруємо onChange')
+                                                return
+                                              }
+                                              
                                               const executorId = Number(e.target.value)
-                                              handleUpdateExecutor(assigned.id, executorId)
+                                              const currentTaskId = assigned.id
+                                              
+                                              console.log('onChange executor для задачі:', currentTaskId, 'новий executorId:', executorId, 'поточний:', assigned.executor_id)
+                                              // Використовуємо замикання для гарантії правильного taskId
+                                              handleUpdateExecutor(currentTaskId, executorId)
+                                            }}
+                                            onFocus={(e) => {
+                                              e.stopPropagation()
+                                              // Стилізуємо при фокусі
+                                              e.currentTarget.style.borderColor = '#ff6b35'
+                                              e.currentTarget.style.boxShadow = '0 0 0 3px rgba(255, 107, 53, 0.1)'
                                             }}
                                             onClick={(e) => e.stopPropagation()}
                                             style={{
@@ -2074,11 +2238,6 @@ export default function ClientsPage() {
                                               borderRadius: '6px',
                                               fontSize: '14px',
                                               transition: 'all 0.2s'
-                                            }}
-                                            onFocus={(e) => {
-                                              e.stopPropagation()
-                                              e.currentTarget.style.borderColor = '#ff6b35'
-                                              e.currentTarget.style.boxShadow = '0 0 0 3px rgba(255, 107, 53, 0.1)'
                                             }}
                                             onBlur={(e) => {
                                               e.currentTarget.style.borderColor = '#e2e8f0'
@@ -2125,13 +2284,17 @@ export default function ClientsPage() {
                                             onClick={(e) => e.stopPropagation()}
                                           >
                                             <input
-                                              key={`active-checkbox-${assigned.id}-${assigned.is_active}`}
+                                              key={`active-checkbox-${assigned.id}`}
                                               type="checkbox"
                                               checked={assigned.is_active}
                                               onChange={(e) => {
                                                 e.stopPropagation()
                                                 e.preventDefault()
-                                                handleToggleTaskActive(assigned.id, assigned.is_active)
+                                                const currentTaskId = assigned.id
+                                                const currentStatus = assigned.is_active
+                                                console.log('onChange checkbox для задачі:', currentTaskId, 'поточний статус:', currentStatus)
+                                                // Використовуємо замикання для гарантії правильного taskId
+                                                handleToggleTaskActive(currentTaskId, currentStatus)
                                               }}
                                               onClick={(e) => {
                                                 e.stopPropagation()

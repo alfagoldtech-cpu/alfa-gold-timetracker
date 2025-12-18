@@ -1,18 +1,50 @@
 import { useState, useEffect } from 'react'
 import { useAuth } from '../contexts/AuthContext'
-import { Link } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import { getRoleById } from '../lib/users'
 import EmployeesPage from './EmployeesPage'
 import ClientsPage from './ClientsPage'
 import CalendarPage from './CalendarPage'
+import TaskCalendarPage from './TaskCalendarPage'
 import './ManagerDashboard.css'
 import './AdminDashboard.css'
 
 export default function ManagerDashboard() {
   const { user, authUser, signOut } = useAuth()
-  const [activeTab, setActiveTab] = useState<'employees' | 'clients' | 'calendar'>('employees')
+  const [searchParams, setSearchParams] = useSearchParams()
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [isTeamLead, setIsTeamLead] = useState(false)
+  
+  // Отримуємо активний таб з URL або sessionStorage
+  const getInitialTab = (): 'employees' | 'clients' | 'calendar' | 'task-calendar' => {
+    const tabFromUrl = searchParams.get('tab') as 'employees' | 'clients' | 'calendar' | 'task-calendar' | null
+    if (tabFromUrl && ['employees', 'clients', 'calendar', 'task-calendar'].includes(tabFromUrl)) {
+      return tabFromUrl
+    }
+    const tabFromStorage = sessionStorage.getItem('managerDashboardTab') as 'employees' | 'clients' | 'calendar' | 'task-calendar' | null
+    if (tabFromStorage && ['employees', 'clients', 'calendar', 'task-calendar'].includes(tabFromStorage)) {
+      return tabFromStorage
+    }
+    return 'employees'
+  }
+  
+  const [activeTab, setActiveTab] = useState<'employees' | 'clients' | 'calendar' | 'task-calendar'>(getInitialTab)
+  
+  // Оновлюємо URL та sessionStorage при зміні таба
+  const handleTabChange = (tab: 'employees' | 'clients' | 'calendar' | 'task-calendar') => {
+    setActiveTab(tab)
+    setSearchParams({ tab })
+    sessionStorage.setItem('managerDashboardTab', tab)
+  }
+
+  // Відновлюємо таб з URL при завантаженні сторінки
+  useEffect(() => {
+    const tabFromUrl = searchParams.get('tab') as 'employees' | 'clients' | 'calendar' | 'task-calendar' | null
+    if (tabFromUrl && ['employees', 'clients', 'calendar', 'task-calendar'].includes(tabFromUrl)) {
+      setActiveTab(tabFromUrl)
+      sessionStorage.setItem('managerDashboardTab', tabFromUrl)
+    }
+  }, [searchParams])
 
   useEffect(() => {
     if (user?.role_id) {
@@ -99,7 +131,7 @@ export default function ManagerDashboard() {
               <button
                 className={`sidebar-nav-item ${activeTab === 'employees' ? 'active' : ''}`}
                 onClick={() => {
-                  setActiveTab('employees')
+                  handleTabChange('employees')
                   setSidebarOpen(false)
                 }}
               >
@@ -114,7 +146,7 @@ export default function ManagerDashboard() {
               <button
                 className={`sidebar-nav-item ${activeTab === 'clients' ? 'active' : ''}`}
                 onClick={() => {
-                  setActiveTab('clients')
+                  handleTabChange('clients')
                   setSidebarOpen(false)
                 }}
               >
@@ -129,9 +161,10 @@ export default function ManagerDashboard() {
               <button
                 className={`sidebar-nav-item ${activeTab === 'calendar' ? 'active' : ''}`}
                 onClick={() => {
-                  setActiveTab('calendar')
+                  handleTabChange('calendar')
                   setSidebarOpen(false)
                 }}
+                style={{ display: isTeamLead ? 'none' : 'flex' }}
               >
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect>
@@ -139,8 +172,43 @@ export default function ManagerDashboard() {
                   <line x1="8" y1="2" x2="8" y2="6"></line>
                   <line x1="3" y1="10" x2="21" y2="10"></line>
                 </svg>
-                <span>{isTeamLead ? 'Планові задачі' : 'Календар'}</span>
+                <span>Календар</span>
               </button>
+              {isTeamLead && (
+                <>
+                  <button
+                    className={`sidebar-nav-item ${activeTab === 'calendar' ? 'active' : ''}`}
+                    onClick={() => {
+                      handleTabChange('calendar')
+                      setSidebarOpen(false)
+                    }}
+                  >
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect>
+                      <line x1="16" y1="2" x2="16" y2="6"></line>
+                      <line x1="8" y1="2" x2="8" y2="6"></line>
+                      <line x1="3" y1="10" x2="21" y2="10"></line>
+                    </svg>
+                    <span>Планові задачі</span>
+                  </button>
+                  <button
+                    className={`sidebar-nav-item ${activeTab === 'task-calendar' ? 'active' : ''}`}
+                    onClick={() => {
+                      handleTabChange('task-calendar')
+                      setSidebarOpen(false)
+                    }}
+                  >
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect>
+                      <line x1="16" y1="2" x2="16" y2="6"></line>
+                      <line x1="8" y1="2" x2="8" y2="6"></line>
+                      <line x1="3" y1="10" x2="21" y2="10"></line>
+                      <path d="M8 14h.01M12 14h.01M16 14h.01M8 18h.01M12 18h.01M16 18h.01"></path>
+                    </svg>
+                    <span>Календар задач</span>
+                  </button>
+                </>
+              )}
             </nav>
           </div>
         </>
@@ -151,6 +219,7 @@ export default function ManagerDashboard() {
           {activeTab === 'employees' && <EmployeesPage />}
           {activeTab === 'clients' && <ClientsPage />}
           {activeTab === 'calendar' && <CalendarPage />}
+          {activeTab === 'task-calendar' && isTeamLead && <TaskCalendarPage />}
         </div>
       </div>
     </div>

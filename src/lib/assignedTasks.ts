@@ -1,5 +1,5 @@
 import { supabase } from './supabase'
-import type { Task, User } from '../types/database'
+import type { Task, User, Client } from '../types/database'
 
 export interface AssignedTask {
   id: number
@@ -19,6 +19,7 @@ export interface AssignedTask {
 export interface AssignedTaskWithDetails extends AssignedTask {
   task?: Task
   executor?: User
+  client?: Pick<Client, 'id' | 'legal_name'>
 }
 
 /**
@@ -110,10 +111,31 @@ export async function createAssignedTask(taskData: {
   executor_id?: number | null
   is_active?: boolean
 }): Promise<AssignedTask | null> {
+  let groupId = taskData.group_id
+
+  // Якщо group_id не встановлено, але є executor_id, беремо group_id з виконавця
+  if (!groupId && taskData.executor_id) {
+    const { data: executor, error: executorError } = await supabase
+      .from('users')
+      .select('group_id')
+      .eq('id', taskData.executor_id)
+      .single()
+
+    if (executorError) {
+      console.error('Error fetching executor for group_id:', executorError)
+    } else if (executor) {
+      groupId = executor.group_id
+      if (groupId) {
+        console.log(`Встановлено group_id ${groupId} з виконавця ${taskData.executor_id}`)
+      }
+    }
+  }
+
   const { data, error } = await supabase
     .from('assigned_tasks')
     .insert({
       ...taskData,
+      group_id: groupId,
       is_active: taskData.is_active !== undefined ? taskData.is_active : true
     })
     .select()
@@ -129,6 +151,7 @@ export async function createAssignedTask(taskData: {
 
 /**
  * Створює кілька призначених задач одночасно
+ * Якщо group_id не встановлено, але є executor_id, беремо group_id з виконавця
  */
 export async function createMultipleAssignedTasks(tasks: Array<{
   task_id: number
@@ -142,10 +165,49 @@ export async function createMultipleAssignedTasks(tasks: Array<{
     return []
   }
 
-  const tasksToInsert = tasks.map(task => ({
-    ...task,
-    is_active: task.is_active !== undefined ? task.is_active : true
-  }))
+  // Отримуємо унікальні executor_id, для яких потрібно отримати group_id
+  const executorIdsToFetch = new Set<number>()
+  tasks.forEach(task => {
+    if (!task.group_id && task.executor_id) {
+      executorIdsToFetch.add(task.executor_id)
+    }
+  })
+
+  // Завантажуємо group_id з виконавців, якщо потрібно
+  const executorGroupMap = new Map<number, number | null>()
+  if (executorIdsToFetch.size > 0) {
+    const { data: executors, error: executorsError } = await supabase
+      .from('users')
+      .select('id, group_id')
+      .in('id', Array.from(executorIdsToFetch))
+
+    if (executorsError) {
+      console.error('Error fetching executors for group_id:', executorsError)
+    } else {
+      executors?.forEach(executor => {
+        executorGroupMap.set(executor.id, executor.group_id)
+      })
+    }
+  }
+
+  // Підготовлюємо задачі для вставки
+  const tasksToInsert = tasks.map(task => {
+    let groupId = task.group_id
+    
+    // Якщо group_id не встановлено, але є executor_id, беремо group_id з виконавця
+    if (!groupId && task.executor_id) {
+      groupId = executorGroupMap.get(task.executor_id) || null
+      if (groupId) {
+        console.log(`Встановлено group_id ${groupId} з виконавця ${task.executor_id}`)
+      }
+    }
+
+    return {
+      ...task,
+      group_id: groupId,
+      is_active: task.is_active !== undefined ? task.is_active : true
+    }
+  })
 
   const { data, error } = await supabase
     .from('assigned_tasks')
@@ -195,5 +257,54 @@ export async function deleteAssignedTask(id: number): Promise<boolean> {
   }
 
   return true
+}
+
+/**
+ * Отримує всі активні призначені задачі для тім ліда
+ * Фільтрує по group_id тім ліда та is_active = true
+ */
+export async function getActiveAssignedTasksForTeamLead(teamLeadGroupId: number): Promise<AssignedTaskWithDetails[]> {
+  console.log('Запит активних задач для тім ліда з group_id:', teamLeadGroupId)
+  
+  const { data, error } = await supabase
+    .from('assigned_tasks')
+    .select(`
+      *,
+      task:tasks(*),
+      executor:users!assigned_tasks_executor_id_fkey(*),
+      client:clients(id, legal_name)
+    `)
+    .eq('group_id', teamLeadGroupId)
+    .eq('is_active', true)
+    .order('created_at', { ascending: false })
+  
+  if (error) {
+    console.error('Помилка запиту активних задач для тім ліда:', error)
+    return []
+  }
+  
+  console.log('Знайдено активних задач для тім ліда (group_id:', teamLeadGroupId, '):', data?.length || 0)
+
+  const mapped = (data || []).map(item => {
+    const task = Array.isArray(item.task) ? item.task[0] : item.task
+    const executor = Array.isArray(item.executor) ? item.executor[0] : item.executor
+    const client = Array.isArray(item.client) ? item.client[0] : item.client
+    
+    // Логування для діагностики
+    if (!task) {
+      console.warn('Assigned task without task data:', item.id, 'task_id:', item.task_id)
+    }
+    
+    return {
+      ...item,
+      task,
+      executor,
+      client
+    }
+  })
+  
+  console.log('Mapped assigned tasks:', mapped.length, 'tasks with task data:', mapped.filter(t => t.task).length)
+  
+  return mapped
 }
 

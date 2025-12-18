@@ -98,3 +98,19 @@ export function formatCurrency(amount?: number): string {
   }).format(amount)
 }
 
+/**
+ * Форматує хвилини у формат "X г. Y хв."
+ * @param minutes - Кількість хвилин (може бути null)
+ * @returns Відформатований час у форматі "X г. Y хв." або "0 г. 0 хв." якщо null
+ */
+export function formatMinutesToHoursMinutes(minutes: number | null | undefined): string {
+  if (minutes === null || minutes === undefined) {
+    return '0 г. 0 хв.'
+  }
+  
+  const hours = Math.floor(minutes / 60)
+  const mins = minutes % 60
+  
+  return `${hours} г. ${mins} хв.`
+}
+
