@@ -3,6 +3,9 @@ import { useParams, useNavigate, Link } from 'react-router-dom'
 import { useAuth } from '../contexts/AuthContext'
 import { getProjectById, getUsersByProject, updateProjectStatus, updateUserStatus } from '../lib/users'
 import type { Project, User } from '../types/database'
+import { formatDate } from '../utils/date'
+import { getStatusBadgeClass, getStatusText } from '../utils/status'
+import { getFullName } from '../utils/user'
 import './AdminPages.css'
 import './AdminDashboard.css'
 
@@ -24,9 +27,12 @@ export default function ProjectViewPage() {
   const handleSignOut = async () => {
     try {
       await signOut()
-      navigate('/login')
+      // Використовуємо тільки повне перезавантаження для гарантованого очищення стану
+      window.location.href = '/login?logout=true'
     } catch (error) {
       console.error('Error signing out:', error)
+      // Навіть якщо є помилка, перенаправляємо на сторінку входу
+      window.location.href = '/login?logout=true'
     }
   }
 
@@ -65,20 +71,6 @@ export default function ProjectViewPage() {
     } finally {
       setLoadingUsers(false)
     }
-  }
-
-  const formatDate = (dateString: string) => {
-    const date = new Date(dateString)
-    return date.toLocaleDateString('uk-UA', {
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-    })
-  }
-
-  const getUserFullName = (user: User) => {
-    const parts = [user.surname, user.name, user.middle_name].filter(Boolean)
-    return parts.join(' ') || '-'
   }
 
   const handleToggleProjectStatus = () => {
@@ -121,7 +113,7 @@ export default function ProjectViewPage() {
         const newStatus = userItem.status === 'active' ? 'inactive' : 'active'
         const result = await updateUserStatus(userItem.id, newStatus)
         if (result) {
-          setSuccess(`Статус користувача "${getUserFullName(userItem)}" змінено на "${newStatus === 'active' ? 'Активний' : 'Неактивний'}"`)
+          setSuccess(`Статус користувача "${getFullName(userItem)}" змінено на "${getStatusText(newStatus)}"`)
           if (project) {
             await loadUsers(project.id)
           }
@@ -357,12 +349,12 @@ export default function ProjectViewPage() {
                       {projectUsers.map((user) => (
                         <tr key={user.id}>
                           <td>{user.id}</td>
-                          <td>{getUserFullName(user)}</td>
+                          <td>{getFullName(user)}</td>
                           <td>{user.email || '-'}</td>
                           <td>{user.phone || '-'}</td>
                           <td>
-                            <span className={`status-badge ${user.status === 'active' ? 'status-active' : 'status-inactive'}`}>
-                              {user.status === 'active' ? 'Активний' : user.status === 'inactive' ? 'Неактивний' : 'Не вказано'}
+                            <span className={`status-badge ${getStatusBadgeClass(user.status)}`}>
+                              {getStatusText(user.status)}
                             </span>
                           </td>
                           <td>{formatDate(user.date_added)}</td>
@@ -441,7 +433,7 @@ export default function ProjectViewPage() {
                   <>
                     <div style={{ marginBottom: '8px' }}>
                       <strong style={{ color: '#718096', fontSize: '14px' }}>ПІБ:</strong>
-                      <div style={{ color: '#2d3748', fontSize: '16px', fontWeight: '600' }}>{getUserFullName(itemToToggle as User)}</div>
+                      <div style={{ color: '#2d3748', fontSize: '16px', fontWeight: '600' }}>{getFullName(itemToToggle as User)}</div>
                     </div>
                     <div style={{ marginBottom: '8px' }}>
                       <strong style={{ color: '#718096', fontSize: '14px' }}>Email:</strong>
@@ -450,8 +442,8 @@ export default function ProjectViewPage() {
                     <div>
                       <strong style={{ color: '#718096', fontSize: '14px' }}>Поточний статус:</strong>
                       <div>
-                        <span className={`status-badge ${(itemToToggle as User).status === 'active' ? 'status-active' : 'status-inactive'}`}>
-                          {(itemToToggle as User).status === 'active' ? 'Активний' : (itemToToggle as User).status === 'inactive' ? 'Неактивний' : 'Не вказано'}
+                        <span className={`status-badge ${getStatusBadgeClass((itemToToggle as User).status)}`}>
+                          {getStatusText((itemToToggle as User).status)}
                         </span>
                       </div>
                     </div>

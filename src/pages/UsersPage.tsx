@@ -1,7 +1,10 @@
 import { useState, useEffect } from 'react'
 import { supabase } from '../lib/supabase'
-import { updateUserStatus, getUserById, getProjectById } from '../lib/users'
+import { updateUserStatus, getUserById } from '../lib/users'
 import type { User, Project } from '../types/database'
+import { formatDate } from '../utils/date'
+import { getStatusBadgeClass, getStatusText } from '../utils/status'
+import { getFullName } from '../utils/user'
 import './AdminPages.css'
 
 interface UserWithProject extends User {
@@ -57,20 +60,6 @@ export default function UsersPage() {
     } finally {
       setLoading(false)
     }
-  }
-
-  const formatDate = (dateString: string) => {
-    const date = new Date(dateString)
-    return date.toLocaleDateString('uk-UA', {
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-    })
-  }
-
-  const getFullName = (user: User) => {
-    const parts = [user.surname, user.name, user.middle_name].filter(Boolean)
-    return parts.join(' ') || '-'
   }
 
   const handleToggleStatusClick = (user: UserWithProject) => {
@@ -169,8 +158,8 @@ export default function UsersPage() {
                   <td>{getFullName(user)}</td>
                   <td>{user.phone || '-'}</td>
                   <td>
-                    <span className={`status-badge ${user.status === 'active' ? 'status-active' : 'status-inactive'}`}>
-                      {user.status === 'active' ? 'Активний' : user.status === 'inactive' ? 'Неактивний' : 'Не вказано'}
+                    <span className={`status-badge ${getStatusBadgeClass(user.status)}`}>
+                      {getStatusText(user.status)}
                     </span>
                   </td>
                   <td>{formatDate(user.date_added)}</td>
@@ -242,8 +231,8 @@ export default function UsersPage() {
                   </div>
                   <div className="card-field">
                     <label>Статус:</label>
-                    <span className={`status-badge ${selectedUser.status === 'active' ? 'status-active' : 'status-inactive'}`}>
-                      {selectedUser.status === 'active' ? 'Активний' : selectedUser.status === 'inactive' ? 'Неактивний' : 'Не вказано'}
+                    <span className={`status-badge ${getStatusBadgeClass(selectedUser.status)}`}>
+                      {getStatusText(selectedUser.status)}
                     </span>
                   </div>
                 </div>
@@ -300,8 +289,8 @@ export default function UsersPage() {
                 <div>
                   <strong style={{ color: '#718096', fontSize: '14px' }}>Поточний статус:</strong>
                   <div>
-                    <span className={`status-badge ${userToToggle.status === 'active' ? 'status-active' : 'status-inactive'}`}>
-                      {userToToggle.status === 'active' ? 'Активний' : userToToggle.status === 'inactive' ? 'Неактивний' : 'Не вказано'}
+                    <span className={`status-badge ${getStatusBadgeClass(userToToggle.status)}`}>
+                      {getStatusText(userToToggle.status)}
                     </span>
                   </div>
                 </div>

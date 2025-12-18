@@ -3,17 +3,24 @@ import { useAuth } from '../contexts/AuthContext'
 import { 
   getUsersByProject, 
   getDepartmentsByProject, 
-  createDepartment, 
-  createUser,
+  createDepartment,
+  updateDepartment,
   getUserDepartments,
   setUserDepartments,
   getUserWithRole,
+  getUserWithDepartments,
   getAllRoles,
-  updateUserStatus
+  updateUserStatus,
+  updateUser,
+  getTeamLeadEmployees,
+  getRoleById
 } from '../lib/users'
-import { signUp, resetPasswordForEmail } from '../lib/auth'
+import { resetPasswordForEmail, updateUserEmailInAuth } from '../lib/auth'
 import { supabase } from '../lib/supabase'
 import type { User, Department, Role } from '../types/database'
+import { formatDate } from '../utils/date'
+import { getStatusBadgeClass, getStatusText } from '../utils/status'
+import { getFullName } from '../utils/user'
 import './AdminPages.css'
 import './ManagerDashboard.css'
 
@@ -24,15 +31,23 @@ interface EmployeeWithRole extends User {
 export default function EmployeesPage() {
   const { user } = useAuth()
   const [employees, setEmployees] = useState<EmployeeWithRole[]>([])
+  const [groupMembers, setGroupMembers] = useState<EmployeeWithRole[]>([])
+  const [employeesWithoutGroup, setEmployeesWithoutGroup] = useState<EmployeeWithRole[]>([])
   const [departments, setDepartments] = useState<Department[]>([])
   const [availableRoles, setAvailableRoles] = useState<Role[]>([])
   const [loading, setLoading] = useState(true)
+  const [isTeamLead, setIsTeamLead] = useState(false)
+  const [teamLeadDepartments, setTeamLeadDepartments] = useState<Department[]>([])
   const [showDepartmentModal, setShowDepartmentModal] = useState(false)
   const [showEmployeeModal, setShowEmployeeModal] = useState(false)
   const [showViewModal, setShowViewModal] = useState(false)
   const [showConfirmModal, setShowConfirmModal] = useState(false)
+  const [showAllDepartmentsModal, setShowAllDepartmentsModal] = useState(false)
   const [selectedEmployee, setSelectedEmployee] = useState<EmployeeWithRole | null>(null)
   const [employeeToToggle, setEmployeeToToggle] = useState<EmployeeWithRole | null>(null)
+  const [editingEmployeeId, setEditingEmployeeId] = useState<number | null>(null)
+  const [editingDepartmentId, setEditingDepartmentId] = useState<number | null>(null)
+  const [editingDepartmentName, setEditingDepartmentName] = useState<string>('')
   const [error, setError] = useState<string | null>(null)
   const [success, setSuccess] = useState<string | null>(null)
 
@@ -51,42 +66,109 @@ export default function EmployeesPage() {
   })
 
   useEffect(() => {
-    if (user?.project_id) {
-      loadData()
-      loadAvailableRoles()
+    if (user?.project_id && user?.role_id) {
+      const initializeData = async () => {
+        // Спочатку визначаємо роль
+        let isTeamLeadRole = false
+        if (user.role_id) {
+          try {
+            const role = await getRoleById(user.role_id)
+            if (role) {
+              isTeamLeadRole = role.role_name === 'Тім лід'
+              setIsTeamLead(isTeamLeadRole)
+            }
+          } catch (error) {
+            console.error('Error checking user role:', error)
+            setIsTeamLead(false)
+          }
+        }
+        
+        // Після визначення ролі завантажуємо дані, передаючи значення ролі безпосередньо
+        await loadData(isTeamLeadRole)
+        await loadAvailableRoles(isTeamLeadRole)
+      }
+      initializeData()
     }
-  }, [user?.project_id])
+  }, [user?.project_id, user?.role_id])
 
-  const loadAvailableRoles = async () => {
+  const loadAvailableRoles = async (isTeamLeadRole?: boolean) => {
     const allRoles = await getAllRoles()
-    // Фільтруємо ролі: керівник виробництва не може створювати адміністратора (id=1) та керівника виробництва (id=2)
-    const filteredRoles = allRoles.filter(role => role.id !== 1 && role.id !== 2)
-    setAvailableRoles(filteredRoles)
+    const isTeamLeadValue = isTeamLeadRole !== undefined ? isTeamLeadRole : isTeamLead
+    
+    if (isTeamLeadValue) {
+      // Тім лід може створювати тільки "Аккаунт менеджер" та "Бухгалтер"
+      const teamLeadRoles = allRoles.filter(role => 
+        role.role_name === 'Аккаунт менеджер' || role.role_name === 'Бухгалтер'
+      )
+      setAvailableRoles(teamLeadRoles)
+    } else {
+      // Керівник виробництва не може створювати адміністратора (id=1) та керівника виробництва (id=2)
+      const filteredRoles = allRoles.filter(role => role.id !== 1 && role.id !== 2)
+      setAvailableRoles(filteredRoles)
+    }
   }
 
-  const loadData = async () => {
+  const loadData = async (isTeamLeadRole?: boolean) => {
     if (!user?.project_id || !user?.id) return
 
     setLoading(true)
     try {
-      const [employeesData, departmentsData] = await Promise.all([
-        getUsersByProject(user.project_id),
-        getDepartmentsByProject(user.project_id)
-      ])
+      const isTeamLeadValue = isTeamLeadRole !== undefined ? isTeamLeadRole : isTeamLead
       
-      // Фільтруємо поточного користувача (керівника виробництва)
-      const filteredEmployees = employeesData.filter(emp => emp.id !== user.id)
-      
-      // Завантажуємо ролі для кожного співробітника
-      const employeesWithRoles = await Promise.all(
-        filteredEmployees.map(async (emp) => {
-          const userWithRole = await getUserWithRole(emp.id)
-          return userWithRole ? { ...emp, role: userWithRole.role } : emp
-        })
-      )
-      
-      setEmployees(employeesWithRoles)
-      setDepartments(departmentsData)
+      if (isTeamLeadValue) {
+        // Для тім ліда спочатку отримуємо його відділи
+        const teamLeadDepts = await getUserDepartments(user.id)
+        const teamLeadDeptIds = teamLeadDepts.map(dept => dept.id)
+        
+        // Завантажуємо своїх працівників та працівників без групи з фільтрацією за відділами
+        // Якщо у тім ліда є відділи, передаємо їх для фільтрації, інакше передаємо undefined
+        const teamLeadData = await getTeamLeadEmployees(
+          user.id, 
+          user.project_id, 
+          teamLeadDeptIds.length > 0 ? teamLeadDeptIds : undefined
+        )
+        
+        // Завантажуємо ролі для співробітників групи
+        const groupMembersWithRoles = await Promise.all(
+          teamLeadData.groupMembers.map(async (emp) => {
+            const userWithRole = await getUserWithRole(emp.id)
+            return userWithRole ? { ...emp, role: userWithRole.role } : emp
+          })
+        )
+        
+        // Завантажуємо ролі для співробітників без групи
+        const withoutGroupWithRoles = await Promise.all(
+          teamLeadData.withoutGroup.map(async (emp) => {
+            const userWithRole = await getUserWithRole(emp.id)
+            return userWithRole ? { ...emp, role: userWithRole.role } : emp
+          })
+        )
+        
+        setGroupMembers(groupMembersWithRoles)
+        setEmployeesWithoutGroup(withoutGroupWithRoles)
+        setTeamLeadDepartments(teamLeadDepts)
+        setDepartments(teamLeadDepts) // Для тім ліда використовуємо тільки його відділи
+      } else {
+        // Для керівника виробництва - стандартна логіка
+        const [employeesData, departmentsData] = await Promise.all([
+          getUsersByProject(user.project_id),
+          getDepartmentsByProject(user.project_id)
+        ])
+        
+        // Фільтруємо поточного користувача
+        const filteredEmployees = employeesData.filter(emp => emp.id !== user.id)
+        
+        // Завантажуємо ролі для кожного співробітника
+        const employeesWithRoles = await Promise.all(
+          filteredEmployees.map(async (emp) => {
+            const userWithRole = await getUserWithRole(emp.id)
+            return userWithRole ? { ...emp, role: userWithRole.role } : emp
+          })
+        )
+        
+        setEmployees(employeesWithRoles)
+        setDepartments(departmentsData)
+      }
     } catch (err) {
       console.error('Error loading data:', err)
       setError('Не вдалося завантажити дані')
@@ -112,6 +194,7 @@ export default function EmployeesPage() {
         setSuccess(`Відділ "${departmentForm.department_name}" успішно створено`)
         setDepartmentForm({ department_name: '' })
         setShowDepartmentModal(false)
+        // Якщо модальне вікно "Всі відділи" відкрите, не закриваємо його
         await loadData()
       } else {
         setError('Не вдалося створити відділ')
@@ -125,9 +208,21 @@ export default function EmployeesPage() {
     e.preventDefault()
     if (!user?.project_id) return
 
-    if (employeeForm.department_ids.length === 0) {
-      setError('Оберіть хоча б один відділ')
-      return
+    // Для тім ліда автоматично призначаємо його відділи
+    if (isTeamLead) {
+      const teamLeadDeptIds = teamLeadDepartments.map(dept => dept.id)
+      if (teamLeadDeptIds.length === 0) {
+        setError('У вас немає відділу. Зверніться до керівника виробництва для призначення відділу.')
+        return
+      }
+      // Автоматично встановлюємо відділи тім ліда
+      setEmployeeForm(prev => ({ ...prev, department_ids: teamLeadDeptIds }))
+    } else {
+      // Для керівника виробництва перевіряємо вибір відділів
+      if (employeeForm.department_ids.length === 0) {
+        setError('Оберіть хоча б один відділ')
+        return
+      }
     }
 
     if (!employeeForm.role_id || employeeForm.role_id === 0) {
@@ -139,28 +234,114 @@ export default function EmployeesPage() {
     setSuccess(null)
 
     try {
-      // Генеруємо тимчасовий пароль
-      const tempPassword = Math.random().toString(36).slice(-12) + Math.random().toString(36).slice(-12).toUpperCase() + '1!'
+      if (editingEmployeeId) {
+        // Редагування існуючого співробітника
+        const allEmployees = isTeamLead 
+          ? [...groupMembers, ...employeesWithoutGroup]
+          : employees
+        const currentEmployee = allEmployees.find(emp => emp.id === editingEmployeeId)
+        if (!currentEmployee) {
+          setError('Співробітник не знайдено')
+          return
+        }
 
-      // 1. Створюємо користувача в Supabase Auth
-      const { data: authData, error: authError } = await supabase.auth.signUp({
-        email: employeeForm.email,
-        password: tempPassword,
-      })
+        const emailChanged = currentEmployee.email !== employeeForm.email
 
-      if (authError) {
-        throw authError
-      }
+        // 1. Оновлюємо дані в таблиці users
+        const updateSuccess = await updateUser(editingEmployeeId, {
+          surname: employeeForm.surname,
+          name: employeeForm.name,
+          middle_name: employeeForm.middle_name,
+          email: employeeForm.email,
+          phone: employeeForm.phone,
+          role_id: employeeForm.role_id
+        })
 
-      if (!authData.user) {
-        throw new Error('Не вдалося створити користувача в системі аутентифікації')
-      }
+        if (!updateSuccess) {
+          setError('Не вдалося оновити дані співробітника')
+          return
+        }
 
-      // 2. Створюємо запис в таблиці users
-      const { data: newUser, error: userError } = await supabase
-        .from('users')
-        .insert({
-          auth_user_id: authData.user.id,
+        // 2. Якщо змінився email - оновлюємо в Supabase Auth
+        if (emailChanged && currentEmployee.auth_user_id) {
+          const authUpdateSuccess = await updateUserEmailInAuth(
+            currentEmployee.auth_user_id,
+            employeeForm.email
+          )
+
+          if (!authUpdateSuccess) {
+            setError('Дані оновлено, але не вдалося оновити email в системі авторизації. Перевірте консоль браузера для деталей. Для роботи потрібно додати VITE_SUPABASE_SERVICE_ROLE_KEY в .env.local')
+            // Продовжуємо, навіть якщо не вдалося оновити email в Auth
+          } else {
+            // Відправляємо email для підтвердження нового email
+            try {
+              await resetPasswordForEmail(employeeForm.email)
+              setSuccess(`Співробітник "${employeeForm.surname} ${employeeForm.name}" успішно оновлено! На новий email "${employeeForm.email}" надіслано посилання для підтвердження.`)
+            } catch (resetError: any) {
+              console.warn('Не вдалося відправити email:', resetError)
+              setSuccess(`Співробітник "${employeeForm.surname} ${employeeForm.name}" успішно оновлено! Увага: не вдалося відправити email для підтвердження нового email.`)
+            }
+          }
+        }
+
+        // 3. Оновлюємо відділи
+        // Для тім ліда не дозволяємо змінювати відділи - залишаємо поточні
+        let deptIds = employeeForm.department_ids
+        if (isTeamLead) {
+          const currentDepts = await getUserDepartments(editingEmployeeId)
+          deptIds = currentDepts.map(d => d.id)
+        }
+        const deptSuccess = await setUserDepartments(editingEmployeeId, deptIds)
+        
+        if (!deptSuccess) {
+          setError('Дані оновлено, але не вдалося оновити відділи')
+        } else if (!emailChanged) {
+          setSuccess(`Співробітник "${employeeForm.surname} ${employeeForm.name}" успішно оновлено!`)
+        }
+
+        resetEmployeeForm()
+        setShowEmployeeModal(false)
+        await loadData()
+      } else {
+        // Створення нового співробітника
+        // Генеруємо тимчасовий пароль
+        const tempPassword = Math.random().toString(36).slice(-12) + Math.random().toString(36).slice(-12).toUpperCase() + '1!'
+
+        // 1. Перевіряємо, чи користувач з таким email вже існує в таблиці users
+        const { data: existingUserRecord } = await supabase
+          .from('users')
+          .select('id, auth_user_id')
+          .eq('email', employeeForm.email)
+          .single()
+
+        if (existingUserRecord) {
+          throw new Error(`Користувач з email ${employeeForm.email} вже існує в системі. ID запису: ${existingUserRecord.id}`)
+        }
+
+        // 2. Створюємо користувача в Supabase Auth
+        const { data: authData, error: authError } = await supabase.auth.signUp({
+          email: employeeForm.email,
+          password: tempPassword,
+        })
+
+        if (authError) {
+          // Якщо помилка про те, що користувач вже існує
+          if (authError.message.includes('already registered') || authError.message.includes('already exists') || authError.message.includes('User already registered')) {
+            throw new Error(`Користувач з email ${employeeForm.email} вже зареєстрований в системі авторизації. Спробуйте використати інший email або зверніться до адміністратора.`)
+          }
+          throw authError
+        }
+
+        if (!authData.user) {
+          throw new Error('Не вдалося створити користувача в системі аутентифікації')
+        }
+
+        const authUserId = authData.user.id
+
+        // 3. Створюємо запис в таблиці users
+        // Якщо це тім лід створює співробітника, встановлюємо group_id
+        const userData: any = {
+          auth_user_id: authUserId,
           project_id: user.project_id,
           role_id: employeeForm.role_id,
           surname: employeeForm.surname,
@@ -169,74 +350,151 @@ export default function EmployeesPage() {
           email: employeeForm.email,
           phone: employeeForm.phone,
           status: 'active',
-        })
-        .select()
-        .single()
+        }
+        
+        // Якщо поточний користувач - тім лід, встановлюємо group_id
+        if (isTeamLead && user.id) {
+          userData.group_id = user.id
+        }
+        
+        const { data: newUser, error: userError } = await supabase
+          .from('users')
+          .insert(userData)
+          .select()
+          .single()
 
-      if (userError) {
-        throw userError
+        if (userError) {
+          throw userError
+        }
+
+        if (!newUser) {
+          throw new Error('Не вдалося створити запис користувача')
+        }
+
+        // 3. Призначаємо департаменти
+        // Для тім ліда використовуємо його відділи, для інших - вибрані відділи
+        const deptIds = isTeamLead 
+          ? teamLeadDepartments.map(dept => dept.id)
+          : employeeForm.department_ids
+        await setUserDepartments(newUser.id, deptIds)
+
+        // 5. Відправляємо email з посиланням для встановлення пароля
+        try {
+          await resetPasswordForEmail(employeeForm.email)
+          setSuccess(`Працівник "${employeeForm.surname} ${employeeForm.name}" успішно створено! На email "${employeeForm.email}" надіслано посилання для встановлення пароля.`)
+        } catch (resetError: any) {
+          console.warn('Не вдалося відправити email:', resetError)
+          setSuccess(`Працівник "${employeeForm.surname} ${employeeForm.name}" успішно створено! Увага: не вдалося відправити email з посиланням для встановлення пароля.`)
+        }
+
+        resetEmployeeForm()
+        setShowEmployeeModal(false)
+        await loadData()
       }
-
-      if (!newUser) {
-        throw new Error('Не вдалося створити запис користувача')
-      }
-
-      // 3. Призначаємо департаменти
-      await setUserDepartments(newUser.id, employeeForm.department_ids)
-
-      // 4. Відправляємо email з посиланням для встановлення пароля
-      try {
-        await resetPasswordForEmail(employeeForm.email)
-        setSuccess(`Працівник "${employeeForm.surname} ${employeeForm.name}" успішно створено! На email "${employeeForm.email}" надіслано посилання для встановлення пароля.`)
-      } catch (resetError: any) {
-        console.warn('Не вдалося відправити email:', resetError)
-        setSuccess(`Працівник "${employeeForm.surname} ${employeeForm.name}" успішно створено! Увага: не вдалося відправити email з посиланням для встановлення пароля.`)
-      }
-
-      // Очищаємо форму
-      setEmployeeForm({
-        surname: '',
-        name: '',
-        middle_name: '',
-        email: '',
-        phone: '',
-        role_id: 0,
-        department_ids: []
-      })
-      setShowEmployeeModal(false)
-      await loadData()
     } catch (err: any) {
-      setError(err.message || 'Помилка створення працівника')
+      setError(err.message || (editingEmployeeId ? 'Помилка оновлення працівника' : 'Помилка створення працівника'))
     }
   }
 
   const isFormValid = () => {
+    // Для тім ліда перевіряємо наявність його відділів замість department_ids
+    const hasDepartments = isTeamLead 
+      ? teamLeadDepartments.length > 0
+      : employeeForm.department_ids.length > 0
+    
     return (
       employeeForm.surname.trim() !== '' &&
       employeeForm.name.trim() !== '' &&
       employeeForm.email.trim() !== '' &&
       employeeForm.role_id > 0 &&
-      employeeForm.department_ids.length > 0
+      hasDepartments
     )
-  }
-
-  const getFullName = (emp: EmployeeWithRole) => {
-    const parts = [emp.surname, emp.name, emp.middle_name].filter(Boolean)
-    return parts.join(' ') || '-'
-  }
-
-  const formatDate = (dateString: string) => {
-    const date = new Date(dateString)
-    return date.toLocaleDateString('uk-UA', {
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-    })
   }
 
   const handleViewEmployee = (employee: EmployeeWithRole) => {
     setSelectedEmployee(employee)
     setShowViewModal(true)
+  }
+
+  const handleEditEmployee = async (employee: EmployeeWithRole) => {
+    try {
+      // Завантажуємо повну інформацію про співробітника з відділами
+      const employeeWithDepts = await getUserWithDepartments(employee.id)
+      
+      if (!employeeWithDepts) {
+        setError('Не вдалося завантажити дані співробітника')
+        return
+      }
+
+      // Заповнюємо форму даними співробітника
+      setEmployeeForm({
+        surname: employeeWithDepts.surname || '',
+        name: employeeWithDepts.name || '',
+        middle_name: employeeWithDepts.middle_name || '',
+        email: employeeWithDepts.email || '',
+        phone: employeeWithDepts.phone || '',
+        role_id: employeeWithDepts.role_id || 0,
+        department_ids: employeeWithDepts.departments?.map(d => d.id) || []
+      })
+
+      setEditingEmployeeId(employee.id)
+      setShowEmployeeModal(true)
+      setError(null)
+      setSuccess(null)
+    } catch (err: any) {
+      console.error('Помилка при завантаженні співробітника для редагування:', err)
+      setError('Не вдалося завантажити дані співробітника')
+    }
+  }
+
+  const resetEmployeeForm = () => {
+    setEmployeeForm({
+      surname: '',
+      name: '',
+      middle_name: '',
+      email: '',
+      phone: '',
+      role_id: 0,
+      department_ids: []
+    })
+    setEditingEmployeeId(null)
+  }
+
+  const handleEditDepartmentName = (department: Department) => {
+    setEditingDepartmentId(department.id)
+    setEditingDepartmentName(department.department_name)
+  }
+
+  const handleSaveDepartmentName = async (departmentId: number) => {
+    if (!editingDepartmentName.trim()) {
+      setError('Назва відділу не може бути порожньою')
+      return
+    }
+
+    setError(null)
+    setSuccess(null)
+
+    try {
+      const success = await updateDepartment(departmentId, {
+        department_name: editingDepartmentName.trim()
+      })
+
+      if (success) {
+        setSuccess('Назву відділу успішно оновлено')
+        setEditingDepartmentId(null)
+        setEditingDepartmentName('')
+        await loadData() // Перезавантажуємо дані
+      } else {
+        setError('Не вдалося оновити назву відділу')
+      }
+    } catch (err: any) {
+      setError(err.message || 'Помилка оновлення назви відділу')
+    }
+  }
+
+  const handleCancelEditDepartment = () => {
+    setEditingDepartmentId(null)
+    setEditingDepartmentName('')
   }
 
   const handleToggleStatusClick = (employee: EmployeeWithRole) => {
@@ -290,27 +548,52 @@ export default function EmployeesPage() {
       <div className="admin-header">
         <h2>Співробітники</h2>
         <div style={{ display: 'flex', gap: '12px' }}>
+          {!isTeamLead && user?.role_id !== 3 && (
+            <>
+              <button 
+                className="btn-primary" 
+                onClick={() => setShowDepartmentModal(true)}
+              >
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <line x1="12" y1="5" x2="12" y2="19"></line>
+                  <line x1="5" y1="12" x2="19" y2="12"></line>
+                </svg>
+                Створити відділ
+              </button>
+              <button 
+                className="btn-primary" 
+                onClick={() => {
+                  setShowAllDepartmentsModal(true)
+                  setError(null)
+                  setSuccess(null)
+                  handleCancelEditDepartment()
+                }}
+              >
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+                  <line x1="9" y1="3" x2="9" y2="21"></line>
+                  <line x1="9" y1="9" x2="21" y2="9"></line>
+                </svg>
+                Всі відділи
+              </button>
+            </>
+          )}
           <button 
-            className="btn-primary" 
-            onClick={() => setShowDepartmentModal(true)}
-          >
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <line x1="12" y1="5" x2="12" y2="19"></line>
-              <line x1="5" y1="12" x2="19" y2="12"></line>
-            </svg>
-            Створити відділ
-          </button>
-          <button 
-            className={`btn-primary ${departments.length === 0 ? 'disabled' : ''}`}
+            className={`btn-primary ${isTeamLead && teamLeadDepartments.length === 0 ? 'disabled' : !isTeamLead && departments.length === 0 ? 'disabled' : ''}`}
             onClick={() => {
-              if (departments.length === 0) {
+              if (isTeamLead && teamLeadDepartments.length === 0) {
+                setError('У вас немає відділу. Зверніться до керівника виробництва для призначення відділу.')
+                return
+              }
+              if (!isTeamLead && departments.length === 0) {
                 setError('Перед тим як створити Вашого першого співробітника створіть департамент')
                 return
               }
+              resetEmployeeForm()
               setShowEmployeeModal(true)
             }}
-            disabled={departments.length === 0}
-            title={departments.length === 0 ? 'Перед тим як створити Вашого першого співробітника створіть департамент' : ''}
+            disabled={(isTeamLead && teamLeadDepartments.length === 0) || (!isTeamLead && departments.length === 0)}
+            title={isTeamLead && teamLeadDepartments.length === 0 ? 'У вас немає відділу. Зверніться до керівника виробництва для призначення відділу.' : !isTeamLead && departments.length === 0 ? 'Перед тим як створити Вашого першого співробітника створіть департамент' : ''}
           >
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <line x1="12" y1="5" x2="12" y2="19"></line>
@@ -339,47 +622,148 @@ export default function EmployeesPage() {
         </div>
       )}
 
-      <div className="table-container">
-        <table className="admin-table">
-          <thead>
-            <tr>
-              <th>ID</th>
-              <th>ПІБ</th>
-              <th>Email</th>
-              <th>Телефон</th>
-              <th>Роль</th>
-              <th>Відділи</th>
-              <th>Статус</th>
-              <th>Дата реєстрації</th>
-              <th>Дії</th>
-            </tr>
-          </thead>
-          <tbody>
-            {employees.length === 0 ? (
-              <tr>
-                <td colSpan={9} style={{ textAlign: 'center', padding: '40px' }}>
-                  Немає співробітників
-                </td>
-              </tr>
-            ) : (
-              employees.map((employee) => (
-                <EmployeeRow 
-                  key={employee.id} 
-                  employee={employee} 
-                  departments={departments}
-                  getFullName={getFullName}
-                  formatDate={formatDate}
-                  onView={handleViewEmployee}
-                  onToggleStatus={handleToggleStatusClick}
-                  currentUserId={user?.id}
-                />
-              ))
-            )}
-          </tbody>
-        </table>
-      </div>
+      {isTeamLead ? (
+        <>
+          {/* Секція для тім ліда: Мої працівники */}
+          <div style={{ marginBottom: '32px' }}>
+            <h3 style={{ marginBottom: '16px', fontSize: '18px', fontWeight: '600', color: '#2d3748' }}>
+              Мої працівники
+            </h3>
+            <div className="table-container">
+              <table className="admin-table">
+                <thead>
+                  <tr>
+                    <th>ID</th>
+                    <th>ПІБ</th>
+                    <th>Email</th>
+                    <th>Телефон</th>
+                    <th>Роль</th>
+                    <th>Відділи</th>
+                    <th>Статус</th>
+                    <th>Дата реєстрації</th>
+                    <th>Дії</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {groupMembers.length === 0 ? (
+                    <tr>
+                      <td colSpan={9} style={{ textAlign: 'center', padding: '40px' }}>
+                        Немає працівників у вашій групі
+                      </td>
+                    </tr>
+                  ) : (
+                    groupMembers.map((employee) => (
+                      <EmployeeRow 
+                        key={employee.id} 
+                        employee={employee} 
+                        departments={departments}
+                        getFullName={getFullName}
+                        formatDate={formatDate}
+                        onView={handleViewEmployee}
+                        onEdit={handleEditEmployee}
+                        onToggleStatus={handleToggleStatusClick}
+                        currentUserId={user?.id}
+                      />
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
 
-      {showDepartmentModal && (
+          {/* Секція для тім ліда: Працівники без групи */}
+          <div>
+            <h3 style={{ marginBottom: '16px', fontSize: '18px', fontWeight: '600', color: '#2d3748' }}>
+              Працівники без групи
+            </h3>
+            <div className="table-container">
+              <table className="admin-table">
+                <thead>
+                  <tr>
+                    <th>ID</th>
+                    <th>ПІБ</th>
+                    <th>Email</th>
+                    <th>Телефон</th>
+                    <th>Роль</th>
+                    <th>Відділи</th>
+                    <th>Статус</th>
+                    <th>Дата реєстрації</th>
+                    <th>Дії</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {employeesWithoutGroup.length === 0 ? (
+                    <tr>
+                      <td colSpan={9} style={{ textAlign: 'center', padding: '40px' }}>
+                        Немає працівників без групи
+                      </td>
+                    </tr>
+                  ) : (
+                    employeesWithoutGroup.map((employee) => (
+                      <EmployeeRow 
+                        key={employee.id} 
+                        employee={employee} 
+                        departments={departments}
+                        getFullName={getFullName}
+                        formatDate={formatDate}
+                        onView={handleViewEmployee}
+                        onEdit={handleEditEmployee}
+                        onToggleStatus={handleToggleStatusClick}
+                        currentUserId={user?.id}
+                        canEdit={false}
+                        canToggleStatus={false}
+                      />
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </>
+      ) : (
+        <div className="table-container">
+          <table className="admin-table">
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>ПІБ</th>
+                <th>Email</th>
+                <th>Телефон</th>
+                <th>Роль</th>
+                <th>Відділи</th>
+                <th>Статус</th>
+                <th>Дата реєстрації</th>
+                <th>Дії</th>
+              </tr>
+            </thead>
+            <tbody>
+              {employees.length === 0 ? (
+                <tr>
+                  <td colSpan={9} style={{ textAlign: 'center', padding: '40px' }}>
+                    Немає співробітників
+                  </td>
+                </tr>
+              ) : (
+                employees.map((employee) => (
+                  <EmployeeRow 
+                    key={employee.id} 
+                    employee={employee} 
+                    departments={departments}
+                    getFullName={getFullName}
+                    formatDate={formatDate}
+                    onView={handleViewEmployee}
+                    onEdit={handleEditEmployee}
+                    onToggleStatus={handleToggleStatusClick}
+                    currentUserId={user?.id}
+                  />
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {showDepartmentModal && !isTeamLead && user?.role_id !== 3 && (
         <div className="modal-overlay" onClick={() => setShowDepartmentModal(false)}>
           <div className="modal-content" onClick={(e) => e.stopPropagation()}>
             <div className="modal-header">
@@ -441,8 +825,8 @@ export default function EmployeesPage() {
                   </div>
                   <div className="card-field">
                     <label>Статус:</label>
-                    <span className={`status-badge ${selectedEmployee.status === 'active' ? 'status-active' : 'status-inactive'}`}>
-                      {selectedEmployee.status === 'active' ? 'Активний' : selectedEmployee.status === 'inactive' ? 'Неактивний' : 'Не вказано'}
+                    <span className={`status-badge ${getStatusBadgeClass(selectedEmployee.status)}`}>
+                      {getStatusText(selectedEmployee.status)}
                     </span>
                   </div>
                 </div>
@@ -532,8 +916,11 @@ export default function EmployeesPage() {
         <div className="modal-overlay" onClick={() => setShowEmployeeModal(false)}>
           <div className="modal-content modal-large" onClick={(e) => e.stopPropagation()}>
             <div className="modal-header">
-              <h3>Створити працівника</h3>
-              <button className="modal-close" onClick={() => setShowEmployeeModal(false)}>
+              <h3>{editingEmployeeId ? 'Редагувати працівника' : 'Створити працівника'}</h3>
+              <button className="modal-close" onClick={() => {
+                setShowEmployeeModal(false)
+                resetEmployeeForm()
+              }}>
                 ×
               </button>
             </div>
@@ -605,42 +992,74 @@ export default function EmployeesPage() {
                   </select>
                 </div>
               </div>
-              <div className="form-group">
-                <label>Відділи *</label>
-                <div style={{ 
-                  display: 'grid', 
-                  gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', 
-                  gap: '12px',
-                  marginTop: '8px'
-                }}>
-                  {departments.map((dept) => (
-                    <label 
-                      key={dept.id}
-                      style={{
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '8px',
-                        padding: '12px',
-                        border: `2px solid ${employeeForm.department_ids.includes(dept.id) ? '#ff6b35' : '#e2e8f0'}`,
-                        borderRadius: '10px',
-                        cursor: 'pointer',
-                        background: employeeForm.department_ids.includes(dept.id) ? '#fff5f0' : '#ffffff',
-                        transition: 'all 0.2s ease'
-                      }}
-                    >
-                      <input
-                        type="checkbox"
-                        checked={employeeForm.department_ids.includes(dept.id)}
-                        onChange={() => toggleDepartment(dept.id)}
-                        style={{ width: '18px', height: '18px', cursor: 'pointer' }}
-                      />
-                      <span style={{ fontWeight: 500, color: '#2d3748' }}>{dept.department_name}</span>
-                    </label>
-                  ))}
+              {!isTeamLead ? (
+                <div className="form-group">
+                  <label>Відділи *</label>
+                  <div style={{ 
+                    display: 'grid', 
+                    gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', 
+                    gap: '12px',
+                    marginTop: '8px'
+                  }}>
+                    {departments.map((dept) => (
+                      <label 
+                        key={dept.id}
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '8px',
+                          padding: '12px',
+                          border: `2px solid ${employeeForm.department_ids.includes(dept.id) ? '#ff6b35' : '#e2e8f0'}`,
+                          borderRadius: '10px',
+                          cursor: 'pointer',
+                          background: employeeForm.department_ids.includes(dept.id) ? '#fff5f0' : '#ffffff',
+                          transition: 'all 0.2s ease'
+                        }}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={employeeForm.department_ids.includes(dept.id)}
+                          onChange={() => toggleDepartment(dept.id)}
+                          style={{ width: '18px', height: '18px', cursor: 'pointer' }}
+                        />
+                        <span style={{ fontWeight: 500, color: '#2d3748' }}>{dept.department_name}</span>
+                      </label>
+                    ))}
+                  </div>
                 </div>
-              </div>
+              ) : (
+                <div className="form-group">
+                  <label>Відділ</label>
+                  <div style={{
+                    padding: '12px 16px',
+                    background: '#f7fafc',
+                    border: '2px solid #e2e8f0',
+                    borderRadius: '8px',
+                    color: '#718096',
+                    fontSize: '14px'
+                  }}>
+                    {teamLeadDepartments.length > 0 ? (
+                      <div>
+                        <div style={{ marginBottom: '8px', fontWeight: '500', color: '#2d3748' }}>
+                          Працівник автоматично буде призначений до вашого відділу:
+                        </div>
+                        <div style={{ color: '#4299e1', fontWeight: '600' }}>
+                          {teamLeadDepartments.map(dept => dept.department_name).join(', ')}
+                        </div>
+                      </div>
+                    ) : (
+                      <div style={{ color: '#e53e3e' }}>
+                        У вас немає відділу. Зверніться до керівника виробництва для призначення відділу.
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
               <div className="modal-actions">
-                <button type="button" className="btn-secondary" onClick={() => setShowEmployeeModal(false)}>
+                <button type="button" className="btn-secondary" onClick={() => {
+                  setShowEmployeeModal(false)
+                  resetEmployeeForm()
+                }}>
                   Скасувати
                 </button>
                 <button 
@@ -648,10 +1067,163 @@ export default function EmployeesPage() {
                   className="btn-primary"
                   disabled={!isFormValid()}
                 >
-                  Створити
+                  {editingEmployeeId ? 'Зберегти зміни' : 'Створити'}
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {showAllDepartmentsModal && !isTeamLead && user?.role_id !== 3 && (
+        <div className="modal-overlay" onClick={() => {
+          setShowAllDepartmentsModal(false)
+          handleCancelEditDepartment()
+        }}>
+          <div className="modal-content modal-large" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3>Всі відділи</h3>
+              <button className="modal-close" onClick={() => {
+                setShowAllDepartmentsModal(false)
+                handleCancelEditDepartment()
+              }}>
+                ×
+              </button>
+            </div>
+            <div style={{ padding: '24px', maxHeight: '70vh', overflowY: 'auto' }}>
+              {/* Форма створення нового відділу */}
+              <div style={{ 
+                marginBottom: '24px', 
+                padding: '16px', 
+                border: '1px solid #e2e8f0', 
+                borderRadius: '8px',
+                background: '#f7fafc'
+              }}>
+                <h4 style={{ marginBottom: '12px', fontSize: '16px', fontWeight: '600', color: '#2d3748' }}>
+                  Створити новий відділ
+                </h4>
+                <form onSubmit={handleCreateDepartment} style={{ display: 'flex', gap: '12px', alignItems: 'flex-end' }}>
+                  <div style={{ flex: 1 }}>
+                    <label style={{ display: 'block', marginBottom: '6px', fontSize: '14px', fontWeight: '500', color: '#4a5568' }}>
+                      Назва відділу *
+                    </label>
+                    <input
+                      type="text"
+                      value={departmentForm.department_name}
+                      onChange={(e) => setDepartmentForm({ department_name: e.target.value })}
+                      placeholder="Введіть назву відділу"
+                      required
+                      style={{
+                        width: '100%',
+                        padding: '8px 12px',
+                        border: '1px solid #cbd5e0',
+                        borderRadius: '4px',
+                        fontSize: '16px'
+                      }}
+                    />
+                  </div>
+                  <button 
+                    type="submit" 
+                    className="btn-primary"
+                    style={{ padding: '8px 20px', whiteSpace: 'nowrap' }}
+                  >
+                    Створити
+                  </button>
+                </form>
+              </div>
+
+              {/* Список відділів */}
+              {departments.length === 0 ? (
+                <p style={{ textAlign: 'center', padding: '40px', color: '#718096' }}>
+                  Немає відділів. Створіть перший відділ вище.
+                </p>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                  {departments.map((department) => (
+                    <div
+                      key={department.id}
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '12px',
+                        padding: '12px',
+                        border: '1px solid #e2e8f0',
+                        borderRadius: '8px',
+                        background: editingDepartmentId === department.id ? '#f7fafc' : '#ffffff',
+                        transition: 'all 0.2s'
+                      }}
+                    >
+                      {editingDepartmentId === department.id ? (
+                        <>
+                          <input
+                            type="text"
+                            value={editingDepartmentName}
+                            onChange={(e) => setEditingDepartmentName(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') {
+                                handleSaveDepartmentName(department.id)
+                              } else if (e.key === 'Escape') {
+                                handleCancelEditDepartment()
+                              }
+                            }}
+                            autoFocus
+                            style={{
+                              flex: 1,
+                              padding: '8px 12px',
+                              border: '2px solid #4299e1',
+                              borderRadius: '4px',
+                              fontSize: '16px'
+                            }}
+                          />
+                          <button
+                            className="btn-primary"
+                            onClick={() => handleSaveDepartmentName(department.id)}
+                            style={{ padding: '8px 16px', whiteSpace: 'nowrap' }}
+                          >
+                            Зберегти
+                          </button>
+                          <button
+                            className="btn-secondary"
+                            onClick={handleCancelEditDepartment}
+                            style={{ padding: '8px 16px', whiteSpace: 'nowrap' }}
+                          >
+                            Скасувати
+                          </button>
+                        </>
+                      ) : (
+                        <>
+                          <span style={{ flex: 1, fontSize: '16px', fontWeight: '500', color: '#2d3748' }}>
+                            {department.department_name}
+                          </span>
+                          <button
+                            className="btn-action btn-edit"
+                            onClick={() => handleEditDepartmentName(department)}
+                            title="Змінити назву відділу"
+                          >
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="18" height="18">
+                              <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path>
+                              <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path>
+                            </svg>
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+            <div className="modal-actions">
+              <button 
+                type="button" 
+                className="btn-secondary" 
+                onClick={() => {
+                  setShowAllDepartmentsModal(false)
+                  handleCancelEditDepartment()
+                }}
+              >
+                Закрити
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -665,16 +1237,22 @@ function EmployeeRow({
   getFullName, 
   formatDate,
   onView,
+  onEdit,
   onToggleStatus,
-  currentUserId
+  currentUserId,
+  canEdit = true,
+  canToggleStatus = true
 }: { 
   employee: EmployeeWithRole
   departments: Department[]
   getFullName: (user: User) => string
   formatDate: (date: string) => string
   onView: (employee: EmployeeWithRole) => void
+  onEdit: (employee: EmployeeWithRole) => void
   onToggleStatus: (employee: EmployeeWithRole) => void
   currentUserId?: number
+  canEdit?: boolean
+  canToggleStatus?: boolean
 }) {
   const [employeeDepartments, setEmployeeDepartments] = useState<Department[]>([])
 
@@ -734,24 +1312,38 @@ function EmployeeRow({
         )}
       </td>
       <td>
-        <span className={`status-badge ${employee.status === 'active' ? 'status-active' : 'status-inactive'}`}>
-          {employee.status === 'active' ? 'Активний' : employee.status === 'inactive' ? 'Неактивний' : 'Не вказано'}
+        <span className={`status-badge ${getStatusBadgeClass(employee.status)}`}>
+          {getStatusText(employee.status)}
         </span>
       </td>
       <td>{formatDate(employee.date_added)}</td>
       <td>
         <div className="action-buttons">
-          <button
-            className={`btn-action btn-toggle ${employee.status === 'active' ? 'inactive' : 'active'} ${employee.id === currentUserId ? 'disabled' : ''}`}
-            onClick={() => onToggleStatus(employee)}
-            disabled={employee.id === currentUserId}
-            title={employee.id === currentUserId ? 'Ви не можете деактивувати себе' : (employee.status === 'active' ? 'Деактивувати' : 'Активувати')}
-          >
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M18.36 6.64a9 9 0 1 1-12.73 0"></path>
-              <line x1="12" y1="2" x2="12" y2="12"></line>
-            </svg>
-          </button>
+          {canEdit && (
+            <button
+              className="btn-action btn-edit"
+              onClick={() => onEdit(employee)}
+              title="Редагувати"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path>
+                <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path>
+              </svg>
+            </button>
+          )}
+          {canToggleStatus && (
+            <button
+              className={`btn-action btn-toggle ${employee.status === 'active' ? 'inactive' : 'active'} ${employee.id === currentUserId ? 'disabled' : ''}`}
+              onClick={() => onToggleStatus(employee)}
+              disabled={employee.id === currentUserId}
+              title={employee.id === currentUserId ? 'Ви не можете деактивувати себе' : (employee.status === 'active' ? 'Деактивувати' : 'Активувати')}
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M18.36 6.64a9 9 0 1 1-12.73 0"></path>
+                <line x1="12" y1="2" x2="12" y2="12"></line>
+              </svg>
+            </button>
+          )}
           <button
             className="btn-action btn-view"
             onClick={() => onView(employee)}

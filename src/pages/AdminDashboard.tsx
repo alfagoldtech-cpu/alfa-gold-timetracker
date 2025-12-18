@@ -6,7 +6,7 @@ import UsersPage from './UsersPage'
 import './AdminDashboard.css'
 
 export default function AdminDashboard() {
-  const { user, authUser, signOut } = useAuth()
+  const { authUser, signOut } = useAuth()
   const navigate = useNavigate()
   const [activeTab, setActiveTab] = useState<'projects' | 'users'>('projects')
   const [sidebarOpen, setSidebarOpen] = useState(false)
@@ -14,9 +14,12 @@ export default function AdminDashboard() {
   const handleSignOut = async () => {
     try {
       await signOut()
-      navigate('/login')
+      // Використовуємо тільки повне перезавантаження для гарантованого очищення стану
+      window.location.href = '/login?logout=true'
     } catch (error) {
       console.error('Error signing out:', error)
+      // Навіть якщо є помилка, перенаправляємо на сторінку входу
+      window.location.href = '/login?logout=true'
     }
   }
 

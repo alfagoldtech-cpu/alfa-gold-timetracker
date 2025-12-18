@@ -1,6 +1,7 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useAuth } from '../contexts/AuthContext'
-import { useNavigate, Link } from 'react-router-dom'
+import { Link } from 'react-router-dom'
+import { getRoleById } from '../lib/users'
 import EmployeesPage from './EmployeesPage'
 import ClientsPage from './ClientsPage'
 import CalendarPage from './CalendarPage'
@@ -9,23 +10,37 @@ import './AdminDashboard.css'
 
 export default function ManagerDashboard() {
   const { user, authUser, signOut } = useAuth()
-  const navigate = useNavigate()
   const [activeTab, setActiveTab] = useState<'employees' | 'clients' | 'calendar'>('employees')
   const [sidebarOpen, setSidebarOpen] = useState(false)
+  const [isTeamLead, setIsTeamLead] = useState(false)
+
+  useEffect(() => {
+    if (user?.role_id) {
+      const checkUserRole = async () => {
+        try {
+          const role = await getRoleById(user.role_id)
+          if (role) {
+            setIsTeamLead(role.role_name === 'Тім лід')
+          }
+        } catch (error) {
+          console.error('Error checking user role:', error)
+          setIsTeamLead(false)
+        }
+      }
+      checkUserRole()
+    }
+  }, [user?.role_id])
 
   const handleSignOut = async () => {
     try {
       await signOut()
-      navigate('/login')
+      // Використовуємо тільки повне перезавантаження для гарантованого очищення стану
+      window.location.href = '/login?logout=true'
     } catch (error) {
       console.error('Error signing out:', error)
+      // Навіть якщо є помилка, перенаправляємо на сторінку входу
+      window.location.href = '/login?logout=true'
     }
-  }
-
-  const getFullName = () => {
-    if (!user) return ''
-    const parts = [user.surname, user.name, user.middle_name].filter(Boolean)
-    return parts.join(' ') || 'Користувач'
   }
 
   return (
@@ -124,7 +139,7 @@ export default function ManagerDashboard() {
                   <line x1="8" y1="2" x2="8" y2="6"></line>
                   <line x1="3" y1="10" x2="21" y2="10"></line>
                 </svg>
-                <span>Календар</span>
+                <span>{isTeamLead ? 'Планові задачі' : 'Календар'}</span>
               </button>
             </nav>
           </div>

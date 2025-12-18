@@ -15,32 +15,20 @@ export async function getAllClients(): Promise<Client[]> {
   return data || []
 }
 
-export async function getClientById(id: number): Promise<Client | null> {
-  const { data, error } = await supabase
-    .from('clients')
-    .select('*')
-    .eq('id', id)
-    .single()
-
-  if (error) {
-    console.error('Error fetching client:', error)
-    return null
-  }
-
-  return data
-}
-
 export async function getClientWithRelations(id: number): Promise<ClientWithRelations | null> {
+  // Використовуємо звичайний join замість inner join, щоб не отримувати помилку
+  // якщо у клієнта немає відділів або працівників
   const { data, error } = await supabase
     .from('clients')
     .select(`
       *,
       kveds (*),
-      client_departments!inner (
+      group_company (*),
+      client_departments (
         department_id,
         departments (*)
       ),
-      client_employees!inner (
+      client_employees (
         user_id,
         users (*)
       )
@@ -50,61 +38,7 @@ export async function getClientWithRelations(id: number): Promise<ClientWithRela
 
   if (error) {
     console.error('Error fetching client with relations:', error)
-    // Якщо помилка через відсутність зв'язків, спробуємо без inner join
-    const { data: fallbackData, error: fallbackError } = await supabase
-      .from('clients')
-      .select(`
-        *,
-        kveds (*),
-        client_departments (
-          department_id,
-          departments (*)
-        ),
-        client_employees (
-          user_id,
-          users (*)
-        )
-      `)
-      .eq('id', id)
-      .single()
-
-    if (fallbackError) {
-      console.error('Error fetching client (fallback):', fallbackError)
-      return null
-    }
-
-    if (!fallbackData) return null
-
-    // Обробляємо відділи
-    let departments: any[] = []
-    if (fallbackData.client_departments) {
-      if (Array.isArray(fallbackData.client_departments)) {
-        departments = fallbackData.client_departments
-          .map((cd: any) => cd.departments)
-          .filter(Boolean)
-      } else if (fallbackData.client_departments.departments) {
-        departments = [fallbackData.client_departments.departments]
-      }
-    }
-
-    // Обробляємо працівників
-    let employees: any[] = []
-    if (fallbackData.client_employees) {
-      if (Array.isArray(fallbackData.client_employees)) {
-        employees = fallbackData.client_employees
-          .map((ce: any) => ce.users)
-          .filter(Boolean)
-      } else if (fallbackData.client_employees.users) {
-        employees = [fallbackData.client_employees.users]
-      }
-    }
-
-    return {
-      ...fallbackData,
-      kved: fallbackData.kveds || undefined,
-      departments: departments,
-      employees: employees,
-    } as ClientWithRelations
+    return null
   }
 
   if (!data) return null
@@ -136,6 +70,7 @@ export async function getClientWithRelations(id: number): Promise<ClientWithRela
   return {
     ...data,
     kved: data.kveds || undefined,
+    group_company: data.group_company || undefined,
     departments: departments,
     employees: employees,
   } as ClientWithRelations
@@ -221,18 +156,4 @@ export async function getAllKveds(): Promise<Kved[]> {
   }
 }
 
-export async function getKvedById(id: number): Promise<Kved | null> {
-  const { data, error } = await supabase
-    .from('kveds')
-    .select('*')
-    .eq('id', id)
-    .single()
-
-  if (error) {
-    console.error('Error fetching kved:', error)
-    return null
-  }
-
-  return data
-}
 

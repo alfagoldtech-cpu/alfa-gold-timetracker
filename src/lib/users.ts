@@ -1,20 +1,5 @@
 import { supabase } from './supabase'
-import type { User, Role, Project, Department, UserDepartment, UserWithDepartments } from '../types/database'
-
-export async function getUserByEmail(email: string): Promise<User | null> {
-  const { data, error } = await supabase
-    .from('users')
-    .select('*')
-    .eq('email', email)
-    .single()
-
-  if (error) {
-    console.error('Error fetching user:', error)
-    return null
-  }
-
-  return data
-}
+import type { User, Role, Project, Department, UserWithDepartments } from '../types/database'
 
 export async function getUserById(id: number): Promise<User | null> {
   const { data, error } = await supabase
@@ -35,6 +20,7 @@ export async function createUser(userData: {
   auth_user_id?: string
   project_id?: number
   role_id: number
+  group_id?: number | null
   surname?: string
   name?: string
   middle_name?: string
@@ -220,6 +206,28 @@ export async function updateUserStatus(userId: number, status: string): Promise<
 
   if (error) {
     console.error('Error updating user status:', error)
+    return false
+  }
+
+  return true
+}
+
+export async function updateUser(userId: number, userData: {
+  surname?: string
+  name?: string
+  middle_name?: string
+  phone?: string
+  email?: string
+  role_id?: number
+  status?: string
+}): Promise<boolean> {
+  const { error } = await supabase
+    .from('users')
+    .update(userData)
+    .eq('id', userId)
+
+  if (error) {
+    console.error('Error updating user:', error)
     return false
   }
 
@@ -442,4 +450,138 @@ export async function getUsersByDepartment(departmentId: number): Promise<User[]
   return (data || []).map((item: any) => 
     Array.isArray(item.users) ? item.users[0] : item.users
   ).filter(Boolean)
+}
+
+// ========== TEAM LEAD GROUP FUNCTIONS ==========
+
+/**
+ * Отримує всіх співробітників, які належать до групи тім ліда
+ * @param teamLeadId - ID тім ліда
+ * @returns Масив співробітників групи
+ */
+export async function getTeamLeadGroupMembers(teamLeadId: number): Promise<User[]> {
+  const { data, error } = await supabase
+    .from('users')
+    .select('*')
+    .eq('group_id', teamLeadId)
+    .order('surname')
+    .order('name')
+
+  if (error) {
+    console.error('Error fetching team lead group members:', error)
+    return []
+  }
+
+  return data || []
+}
+
+/**
+ * Отримує всіх співробітників без групи (які не є тім лідами)
+ * @param projectId - ID проекту
+ * @param departmentIds - Опціональний масив ID відділів для фільтрації
+ * @returns Масив співробітників без групи
+ */
+export async function getUsersWithoutGroup(projectId: number, departmentIds?: number[]): Promise<User[]> {
+  // Спочатку отримуємо ID ролі "Тім лід"
+  const { data: teamLeadRole, error: roleError } = await supabase
+    .from('roles')
+    .select('id')
+    .eq('role_name', 'Тім лід')
+    .single()
+
+  if (roleError || !teamLeadRole) {
+    console.error('Error fetching team lead role:', roleError)
+    return []
+  }
+
+  // Якщо вказані відділи, отримуємо користувачів через user_departments
+  if (departmentIds && departmentIds.length > 0) {
+    // Отримуємо всіх користувачів, які належать до вказаних відділів
+    const { data: usersByDept, error: deptError } = await supabase
+      .from('user_departments')
+      .select(`
+        user_id,
+        users (*)
+      `)
+      .in('department_id', departmentIds)
+
+    if (deptError) {
+      console.error('Error fetching users by departments:', deptError)
+      return []
+    }
+
+    // Отримуємо ID ролі "Тім лід" для фільтрації
+    const userIds = (usersByDept || [])
+      .map((item: any) => {
+        const user = Array.isArray(item.users) ? item.users[0] : item.users
+        return user?.id
+      })
+      .filter(Boolean)
+
+    if (userIds.length === 0) {
+      return []
+    }
+
+    // Отримуємо користувачів, які:
+    // 1. Не є тім лідами (role_id != teamLeadRole.id)
+    // 2. Не мають group_id (group_id IS NULL)
+    // 3. Належать до вказаних відділів
+    const { data, error } = await supabase
+      .from('users')
+      .select('*')
+      .in('id', userIds)
+      .eq('project_id', projectId)
+      .neq('role_id', teamLeadRole.id)
+      .is('group_id', null)
+      .order('surname')
+      .order('name')
+
+    if (error) {
+      console.error('Error fetching users without group:', error)
+      return []
+    }
+
+    return data || []
+  }
+
+  // Якщо відділи не вказані, повертаємо всіх без групи (стара логіка)
+  const { data, error } = await supabase
+    .from('users')
+    .select('*')
+    .eq('project_id', projectId)
+    .neq('role_id', teamLeadRole.id)
+    .is('group_id', null)
+    .order('surname')
+    .order('name')
+
+  if (error) {
+    console.error('Error fetching users without group:', error)
+    return []
+  }
+
+  return data || []
+}
+
+/**
+ * Отримує всіх співробітників для тім ліда:
+ * - Своїх працівників (з group_id = teamLeadId)
+ * - Працівників без групи (group_id IS NULL і не є тім лідами), які належать до відділів тім ліда
+ * @param teamLeadId - ID тім ліда
+ * @param projectId - ID проекту
+ * @param departmentIds - Масив ID відділів тім ліда
+ * @returns Об'єкт з двома масивами: groupMembers та withoutGroup
+ */
+export async function getTeamLeadEmployees(teamLeadId: number, projectId: number, departmentIds?: number[]): Promise<{
+  groupMembers: User[]
+  withoutGroup: User[]
+}> {
+  const [groupMembers, withoutGroup] = await Promise.all([
+    getTeamLeadGroupMembers(teamLeadId),
+    getUsersWithoutGroup(projectId, departmentIds)
+  ])
+
+  return {
+    groupMembers,
+    withoutGroup
+  }
 }

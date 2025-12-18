@@ -25,6 +25,7 @@ export interface User {
   auth_user_id?: string
   project_id?: number
   role_id: number
+  group_id?: number | null
   surname?: string
   name?: string
   middle_name?: string
@@ -62,6 +63,14 @@ export interface Kved {
   updated_at: string
 }
 
+export interface GroupCompany {
+  id: number
+  group_name: string
+  project_id: number
+  created_at: string
+  updated_at: string
+}
+
 export interface Client {
   id: number
   edrpou?: string
@@ -69,6 +78,7 @@ export interface Client {
   phone?: string
   status?: string
   company_group?: string
+  group_company_id?: number
   service_cost?: number
   company_folder?: string
   client_card?: string
@@ -100,8 +110,17 @@ export interface ClientEmployee {
 
 export interface ClientWithRelations extends Client {
   kved?: Kved
+  group_company?: GroupCompany
   departments?: Department[]
   employees?: User[]
+}
+
+export interface TaskCategory {
+  id: number
+  name: string
+  project_id: number
+  created_at: string
+  updated_at: string
 }
 
 export interface Task {
@@ -109,9 +128,8 @@ export interface Task {
   project_id: number
   task_name: string
   task_type?: string
-  category?: string
+  category_id?: number
   planned_date: string
-  status?: string
   description?: string
   created_at: string
   updated_at: string
@@ -169,6 +187,11 @@ export interface Database {
         Row: Task
         Insert: Omit<Task, 'id' | 'created_at' | 'updated_at'>
         Update: Partial<Omit<Task, 'id' | 'created_at' | 'updated_at'>>
+      }
+      group_company: {
+        Row: GroupCompany
+        Insert: Omit<GroupCompany, 'id' | 'created_at' | 'updated_at'>
+        Update: Partial<Omit<GroupCompany, 'id' | 'created_at' | 'updated_at'>>
       }
     }
   }

@@ -16,21 +16,6 @@ export async function getTasksByProject(projectId: number): Promise<Task[]> {
   return data || []
 }
 
-export async function getTaskById(id: number): Promise<Task | null> {
-  const { data, error } = await supabase
-    .from('tasks')
-    .select('*')
-    .eq('id', id)
-    .single()
-
-  if (error) {
-    console.error('Error fetching task:', error)
-    return null
-  }
-
-  return data
-}
-
 export async function createTask(taskData: Omit<Task, 'id' | 'created_at' | 'updated_at'>): Promise<Task | null> {
   const { data, error } = await supabase
     .from('tasks')
@@ -72,9 +57,5 @@ export async function deleteTask(id: number): Promise<boolean> {
   }
 
   return true
-}
-
-export async function updateTaskStatus(id: number, status: string): Promise<boolean> {
-  return updateTask(id, { status })
 }
 

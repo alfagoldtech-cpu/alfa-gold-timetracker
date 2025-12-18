@@ -1,0 +1,14 @@
+-- Примітка: RPC функція не може напряму оновлювати auth.users через PostgreSQL
+-- Для оновлення email в Supabase Auth потрібно використовувати Admin API через service role key
+-- або створити Edge Function в Supabase
+-- 
+-- Функція updateUserEmailInAuth в src/lib/auth.ts використовує:
+-- 1. Спроба викликати RPC функцію (якщо вона існує)
+-- 2. Якщо RPC не існує - використовує Admin API напряму через service role key
+--
+-- Для роботи потрібно:
+-- 1. Додати VITE_SUPABASE_SERVICE_ROLE_KEY в .env.local (НЕ комітити в git!)
+-- 2. Або створити Edge Function в Supabase для безпечного оновлення email
+--
+-- Цей файл залишається як документація. Фактичне оновлення email відбувається через Admin API в коді.
+

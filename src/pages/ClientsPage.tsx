@@ -1,35 +1,75 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useAuth } from '../contexts/AuthContext'
+import { useNavigate } from 'react-router-dom'
 import { 
   getAllClients, 
   createClient, 
+  updateClient,
   updateClientStatus,
   getAllKveds,
   getClientWithRelations
 } from '../lib/clients'
-import { getDepartmentsByProject } from '../lib/users'
+import { getDepartmentsByProject, getUserDepartments, getRoleById, getAllRoles } from '../lib/users'
+import { searchGroupCompanies, createGroupCompany, getGroupCompaniesByProject, updateGroupCompany } from '../lib/groupCompanies'
+import { 
+  getActiveAssignedTasksCountForClients,
+  getAssignedTasksByClient,
+  createMultipleAssignedTasks,
+  updateAssignedTask,
+  type AssignedTaskWithDetails
+} from '../lib/assignedTasks'
+import { getTasksByProject } from '../lib/tasks'
+import { getUsersByProject } from '../lib/users'
 import { supabase } from '../lib/supabase'
-import type { Client, Kved, Department, ClientWithRelations } from '../types/database'
+import type { Client, Kved, Department, GroupCompany, Task, User } from '../types/database'
+import { formatDate, formatCurrency, formatDateToUA, parseDateToISO } from '../utils/date'
+import { getStatusBadgeClass, getStatusText } from '../utils/status'
 
 interface ClientWithDepartments extends Client {
   departments?: Department[]
+  activeTasksCount?: number
 }
 import './AdminPages.css'
 import './ManagerDashboard.css'
 
 export default function ClientsPage() {
   const { user } = useAuth()
+  const navigate = useNavigate()
   const [clients, setClients] = useState<ClientWithDepartments[]>([])
   const [kveds, setKveds] = useState<Kved[]>([])
   const [departments, setDepartments] = useState<Department[]>([])
+  const [isTeamLead, setIsTeamLead] = useState(false)
+  const [teamLeadDepartments, setTeamLeadDepartments] = useState<Department[]>([])
+  const [groupCompanies, setGroupCompanies] = useState<GroupCompany[]>([])
+  const [filteredGroupCompanies, setFilteredGroupCompanies] = useState<GroupCompany[]>([])
+  const [groupCompanySearch, setGroupCompanySearch] = useState('')
+  const [showGroupCompanyDropdown, setShowGroupCompanyDropdown] = useState(false)
+  const [showCreateGroupModal, setShowCreateGroupModal] = useState(false)
+  const [showAllGroupsModal, setShowAllGroupsModal] = useState(false)
+  const [newGroupName, setNewGroupName] = useState('')
+  const [editingGroupId, setEditingGroupId] = useState<number | null>(null)
+  const [editingGroupName, setEditingGroupName] = useState<string>('')
+  const groupCompanyInputRef = useRef<HTMLInputElement>(null)
+  const groupCompanyDropdownRef = useRef<HTMLDivElement>(null)
   const [loading, setLoading] = useState(true)
   const [showCreateModal, setShowCreateModal] = useState(false)
-  const [showViewModal, setShowViewModal] = useState(false)
   const [showConfirmModal, setShowConfirmModal] = useState(false)
-  const [selectedClient, setSelectedClient] = useState<ClientWithRelations | null>(null)
   const [clientToToggle, setClientToToggle] = useState<Client | null>(null)
+  const [editingClientId, setEditingClientId] = useState<number | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [success, setSuccess] = useState<string | null>(null)
+  const [expandedClientGroups, setExpandedClientGroups] = useState<Set<number | 'no-group'>>(new Set())
+  
+  // Стани для модального вікна призначення задач
+  const [showAssignTasksModal, setShowAssignTasksModal] = useState(false)
+  const [selectedClientForTasks, setSelectedClientForTasks] = useState<ClientWithDepartments | null>(null)
+  const [assignedTasks, setAssignedTasks] = useState<AssignedTaskWithDetails[]>([])
+  const [availableTasks, setAvailableTasks] = useState<Task[]>([])
+  const [availableExecutors, setAvailableExecutors] = useState<User[]>([])
+  const [selectedTaskId, setSelectedTaskId] = useState<number>(0)
+  const [selectedTaskDates, setSelectedTaskDates] = useState<Array<{ month: number; date: string; executorId: number; isActive: boolean }>>([])
+  const [expandedAssignedTaskGroups, setExpandedAssignedTaskGroups] = useState<Set<string>>(new Set())
+  const [editingAssignedTaskId, setEditingAssignedTaskId] = useState<number | null>(null)
 
   const [clientForm, setClientForm] = useState({
     edrpou: '',
@@ -37,6 +77,7 @@ export default function ClientsPage() {
     phone: '',
     status: 'active',
     company_group: '',
+    group_company_id: 0,
     service_cost: '',
     company_folder: '',
     client_card: '',
@@ -54,54 +95,411 @@ export default function ClientsPage() {
   })
 
   useEffect(() => {
-    if (user?.project_id) {
-      loadData()
+    if (user?.project_id && user?.role_id) {
+      const initializeData = async () => {
+        // Спочатку визначаємо роль
+        let isTeamLeadRole = false
+        if (user.role_id) {
+          try {
+            const role = await getRoleById(user.role_id)
+            if (role) {
+              isTeamLeadRole = role.role_name === 'Тім лід'
+              setIsTeamLead(isTeamLeadRole)
+            }
+          } catch (error) {
+            console.error('Error checking user role:', error)
+            setIsTeamLead(false)
+          }
+        }
+        
+        // Після визначення ролі завантажуємо дані
+        await loadData(isTeamLeadRole)
+      }
+      initializeData()
     }
-  }, [user?.project_id])
+  }, [user?.project_id, user?.role_id])
 
-  const loadData = async () => {
+  // Обробка пошуку груп компаній
+  useEffect(() => {
+    if (!user?.project_id) return
+
+    if (groupCompanySearch.trim() === '') {
+      setFilteredGroupCompanies(groupCompanies)
+    } else {
+      const searchGroups = async () => {
+        const results = await searchGroupCompanies(user.project_id!, groupCompanySearch)
+        setFilteredGroupCompanies(results)
+      }
+      const timeoutId = setTimeout(searchGroups, 300)
+      return () => clearTimeout(timeoutId)
+    }
+  }, [groupCompanySearch, groupCompanies, user?.project_id])
+
+  // Закриваємо dropdown при кліку поза ним
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (
+        groupCompanyInputRef.current &&
+        !groupCompanyInputRef.current.contains(event.target as Node) &&
+        groupCompanyDropdownRef.current &&
+        !groupCompanyDropdownRef.current.contains(event.target as Node)
+      ) {
+        setShowGroupCompanyDropdown(false)
+      }
+    }
+
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [])
+
+  const loadData = async (isTeamLeadRole?: boolean) => {
     if (!user?.project_id) return
 
     setLoading(true)
+    setError(null)
+    setSuccess(null)
+    
     try {
-      const [clientsData, kvedsData, departmentsData] = await Promise.all([
+      const isTeamLeadValue = isTeamLeadRole !== undefined ? isTeamLeadRole : isTeamLead
+      
+      // Для тім ліда спочатку отримуємо його відділи
+      let teamLeadDepts: Department[] = []
+      if (isTeamLeadValue && user?.id) {
+        teamLeadDepts = await getUserDepartments(user.id)
+        setTeamLeadDepartments(teamLeadDepts)
+      }
+      
+      // Завантажуємо дані паралельно, але обробляємо помилки окремо
+      const results = await Promise.allSettled([
         getAllClients(),
         getAllKveds(),
-        getDepartmentsByProject(user.project_id)
+        isTeamLeadValue ? Promise.resolve(teamLeadDepts) : getDepartmentsByProject(user.project_id),
+        getGroupCompaniesByProject(user.project_id)
       ])
       
-      // Завантажуємо відділи для кожного клієнта
+      const clientsData = results[0].status === 'fulfilled' ? results[0].value : []
+      const kvedsData = results[1].status === 'fulfilled' ? results[1].value : []
+      const departmentsData = results[2].status === 'fulfilled' ? results[2].value : []
+      const groupCompaniesData = results[3].status === 'fulfilled' ? results[3].value : []
+      
+      // Логуємо помилки окремо
+      if (results[0].status === 'rejected') {
+        console.error('Помилка завантаження клієнтів:', results[0].reason)
+      }
+      if (results[1].status === 'rejected') {
+        console.error('Помилка завантаження КВЕДів:', results[1].reason)
+      }
+      if (results[2].status === 'rejected') {
+        console.error('Помилка завантаження відділів:', results[2].reason)
+      }
+      if (results[3].status === 'rejected') {
+        console.error('Помилка завантаження груп компаній:', results[3].reason)
+      }
+      
+      // Завантажуємо відділи для кожного клієнта (з обробкою помилок)
       const clientsWithDepartments = await Promise.all(
         clientsData.map(async (client) => {
+          try {
           const clientWithRelations = await getClientWithRelations(client.id)
           return {
             ...client,
             departments: clientWithRelations?.departments || []
+            }
+          } catch (err) {
+            console.warn(`Помилка завантаження відділів для клієнта ${client.id}:`, err)
+            return {
+              ...client,
+              departments: []
+            }
           }
         })
       )
       
-      setClients(clientsWithDepartments)
+      // Для тім ліда фільтруємо клієнтів за відділами
+      let filteredClients = clientsWithDepartments
+      if (isTeamLeadValue && teamLeadDepts.length > 0) {
+        const teamLeadDeptIds = teamLeadDepts.map(dept => dept.id)
+        filteredClients = clientsWithDepartments.filter(client => {
+          // Перевіряємо, чи є хоча б один відділ клієнта, який збігається з відділами тім ліда
+          const clientDeptIds = client.departments?.map(dept => dept.id) || []
+          return clientDeptIds.some(deptId => teamLeadDeptIds.includes(deptId))
+        })
+      } else if (isTeamLeadValue) {
+        // Якщо тім лід не має відділів, показуємо порожній список
+        filteredClients = []
+      }
+      
+      // Завантажуємо кількість активних призначених задач для всіх клієнтів
+      if (filteredClients.length > 0) {
+        const clientIds = filteredClients.map(client => client.id)
+        const tasksCounts = await getActiveAssignedTasksCountForClients(clientIds)
+        
+        // Додаємо кількість задач до кожного клієнта
+        filteredClients = filteredClients.map(client => ({
+          ...client,
+          activeTasksCount: tasksCounts.get(client.id) || 0
+        }))
+      }
+      
+      setClients(filteredClients)
       setKveds(kvedsData)
       setDepartments(departmentsData)
+      setGroupCompanies(groupCompaniesData)
+      setFilteredGroupCompanies(groupCompaniesData)
+      
+      // Формуємо повідомлення про помилки
+      const errors: string[] = []
+      
+      if (results[0].status === 'rejected') {
+        errors.push('Не вдалося завантажити клієнтів')
+      }
       
       if (kvedsData.length === 0) {
         console.warn('КВЕДи не знайдено.')
         console.warn('Переконайтеся, що виконано міграції:')
         console.warn('1. 003_create_kveds.sql - створення таблиці')
         console.warn('2. 005_insert_kveds.sql - вставка даних')
-        setError('КВЕДи не завантажено. Перевірте консоль браузера для деталей.')
-      } else {
-        // Очищаємо помилку, якщо КВЕДи завантажилися
-        if (error && error.includes('КВЕДи')) {
-          setError(null)
-        }
+        errors.push('КВЕДи не знайдено. Переконайтеся, що міграція виконана в Supabase.')
       }
-    } catch (err) {
-      console.error('Error loading data:', err)
-      setError('Не вдалося завантажити дані')
+      
+      if (results[2].status === 'rejected') {
+        errors.push('Не вдалося завантажити відділи')
+      }
+      
+      if (results[3].status === 'rejected') {
+        errors.push('Не вдалося завантажити групи компаній')
+      }
+      
+      // Показуємо помилки, якщо є критичні
+      if (errors.length > 0) {
+        setError(errors.join('. '))
+      }
+    } catch (err: any) {
+      console.error('Неочікувана помилка при завантаженні даних:', err)
+      setError(`Не вдалося завантажити дані: ${err.message || 'Невідома помилка'}`)
     } finally {
       setLoading(false)
+    }
+  }
+
+  const handleCreateGroupCompany = async () => {
+    if (!newGroupName.trim()) {
+      setError('Введіть назву групи компаній')
+      return
+    }
+
+    if (!user?.project_id) {
+      setError('Не вдалося визначити проект')
+      return
+    }
+
+    try {
+      const newGroup = await createGroupCompany(newGroupName.trim(), user.project_id)
+      if (newGroup) {
+        setGroupCompanies([...groupCompanies, newGroup])
+        setFilteredGroupCompanies([...groupCompanies, newGroup])
+        setClientForm({ ...clientForm, group_company_id: newGroup.id })
+        setGroupCompanySearch(newGroup.group_name)
+        setShowCreateGroupModal(false)
+        setNewGroupName('')
+        setSuccess(`Групу компаній "${newGroup.group_name}" успішно створено`)
+      } else {
+        setError('Не вдалося створити групу компаній')
+      }
+    } catch (err: any) {
+      setError(err.message || 'Помилка створення групи компаній')
+    }
+  }
+
+  const handleSelectGroupCompany = (group: GroupCompany) => {
+    setClientForm({ ...clientForm, group_company_id: group.id })
+    setGroupCompanySearch(group.group_name)
+    setShowGroupCompanyDropdown(false)
+  }
+
+  const handleEditGroupName = (group: GroupCompany) => {
+    setEditingGroupId(group.id)
+    setEditingGroupName(group.group_name)
+  }
+
+  const handleSaveGroupName = async (groupId: number) => {
+    if (!editingGroupName.trim()) {
+      setError('Назва групи компаній не може бути порожньою')
+      return
+    }
+
+    setError(null)
+    setSuccess(null)
+
+    try {
+      const success = await updateGroupCompany(groupId, editingGroupName.trim())
+
+      if (success) {
+        setSuccess('Назву групи компаній успішно оновлено')
+        setEditingGroupId(null)
+        setEditingGroupName('')
+        await loadData() // Перезавантажуємо дані
+      } else {
+        setError('Не вдалося оновити назву групи компаній')
+      }
+    } catch (err: any) {
+      setError(err.message || 'Помилка оновлення назви групи компаній')
+    }
+  }
+
+  const handleCancelEditGroup = () => {
+    setEditingGroupId(null)
+    setEditingGroupName('')
+  }
+
+  const handleCreateGroupInModal = async () => {
+    if (!newGroupName.trim()) {
+      setError('Введіть назву групи компаній')
+      return
+    }
+
+    if (!user?.project_id) {
+      setError('Не вдалося визначити проект')
+      return
+    }
+
+    setError(null)
+    setSuccess(null)
+
+    try {
+      const newGroup = await createGroupCompany(newGroupName.trim(), user.project_id)
+      if (newGroup) {
+        setSuccess(`Групу компаній "${newGroup.group_name}" успішно створено`)
+        setNewGroupName('')
+        await loadData() // Перезавантажуємо дані
+      } else {
+        setError('Не вдалося створити групу компаній')
+      }
+    } catch (err: any) {
+      setError(err.message || 'Помилка створення групи компаній')
+    }
+  }
+
+  const handleEditClient = async (client: ClientWithDepartments) => {
+    try {
+      // Завантажуємо повну інформацію про клієнта з відділами
+      const clientWithRelations = await getClientWithRelations(client.id)
+      
+      if (!clientWithRelations) {
+        setError('Не вдалося завантажити дані клієнта')
+        return
+      }
+
+      // Заповнюємо форму даними клієнта
+      setClientForm({
+        edrpou: clientWithRelations.edrpou || '',
+        legal_name: clientWithRelations.legal_name,
+        phone: clientWithRelations.phone || '',
+        status: clientWithRelations.status || 'active',
+        company_group: clientWithRelations.company_group || '',
+        group_company_id: clientWithRelations.group_company_id || 0,
+        service_cost: clientWithRelations.service_cost?.toString() || '',
+        company_folder: clientWithRelations.company_folder || '',
+        client_card: clientWithRelations.client_card || '',
+        address: clientWithRelations.address || '',
+        city: clientWithRelations.city || '',
+        kved_id: clientWithRelations.kved_id || 0,
+        activity_type: clientWithRelations.activity_type || '',
+        email: clientWithRelations.email || '',
+        type: clientWithRelations.type || '',
+        director_full_name: clientWithRelations.director_full_name || '',
+        gender: clientWithRelations.gender || '',
+        iban: clientWithRelations.iban || '',
+        bank_name: clientWithRelations.bank_name || '',
+        department_ids: clientWithRelations.departments?.map(d => d.id) || []
+      })
+
+      // Встановлюємо пошук групи компаній, якщо вона є
+      if (clientWithRelations.group_company) {
+        setGroupCompanySearch(clientWithRelations.group_company.group_name)
+      } else {
+        setGroupCompanySearch('')
+      }
+
+      setEditingClientId(client.id)
+      setShowCreateModal(true)
+      setError(null)
+      setSuccess(null)
+    } catch (err: any) {
+      console.error('Помилка при завантаженні клієнта для редагування:', err)
+      setError('Не вдалося завантажити дані клієнта')
+    }
+  }
+
+  const resetForm = () => {
+    // Для тім ліда автоматично встановлюємо його відділи
+    const defaultDepartmentIds = isTeamLead && teamLeadDepartments.length > 0
+      ? teamLeadDepartments.map(dept => dept.id)
+      : []
+    
+    setClientForm({
+      edrpou: '',
+      legal_name: '',
+      phone: '',
+      status: 'active',
+      company_group: '',
+      group_company_id: 0,
+      service_cost: '',
+      company_folder: '',
+      client_card: '',
+      address: '',
+      city: '',
+      kved_id: 0,
+      activity_type: '',
+      email: '',
+      type: '',
+      director_full_name: '',
+      gender: '',
+      iban: '',
+      bank_name: '',
+      department_ids: defaultDepartmentIds
+    })
+    setGroupCompanySearch('')
+    setShowGroupCompanyDropdown(false)
+    setEditingClientId(null)
+  }
+
+  const updateClientDepartments = async (clientId: number, departmentIds: number[]) => {
+    try {
+      // Видаляємо всі поточні відділи клієнта
+      const { error: deleteError } = await supabase
+        .from('client_departments')
+        .delete()
+        .eq('client_id', clientId)
+
+      if (deleteError) {
+        console.error('Помилка при видаленні відділів:', deleteError)
+        return false
+      }
+
+      // Додаємо нові відділи, якщо вони є
+      if (departmentIds.length > 0) {
+        const departmentResults = await Promise.all(
+          departmentIds.map(deptId =>
+            supabase.from('client_departments').insert({
+              client_id: clientId,
+              department_id: deptId
+            })
+          )
+        )
+        
+        // Перевіряємо чи є помилки
+        const errors = departmentResults.filter(result => result.error)
+        if (errors.length > 0) {
+          console.error('Помилки при збереженні відділів:', errors)
+          return false
+        }
+      }
+
+      return true
+    } catch (err) {
+      console.error('Помилка при оновленні відділів:', err)
+      return false
     }
   }
 
@@ -117,12 +515,13 @@ export default function ClientsPage() {
     setSuccess(null)
 
     try {
-      const newClient = await createClient({
+      const clientData = {
         edrpou: clientForm.edrpou || undefined,
         legal_name: clientForm.legal_name,
         phone: clientForm.phone || undefined,
         status: clientForm.status,
         company_group: clientForm.company_group || undefined,
+        group_company_id: clientForm.group_company_id > 0 ? clientForm.group_company_id : undefined,
         service_cost: clientForm.service_cost ? parseFloat(clientForm.service_cost) : undefined,
         company_folder: clientForm.company_folder || undefined,
         client_card: clientForm.client_card || undefined,
@@ -136,74 +535,58 @@ export default function ClientsPage() {
         gender: clientForm.gender || undefined,
         iban: clientForm.iban || undefined,
         bank_name: clientForm.bank_name || undefined,
-      })
+      }
+
+      if (editingClientId) {
+        // Редагування існуючого клієнта
+        const success = await updateClient(editingClientId, clientData)
+        
+        if (success) {
+          // Оновлюємо відділи
+          const deptSuccess = await updateClientDepartments(editingClientId, clientForm.department_ids)
+          
+          if (!deptSuccess) {
+            setError('Клієнт оновлено, але не вдалося зберегти відділи')
+          } else {
+            setSuccess(`Клієнт "${clientForm.legal_name}" успішно оновлено`)
+          }
+          
+          resetForm()
+          setShowCreateModal(false)
+          await loadData()
+        } else {
+          setError('Не вдалося оновити клієнта')
+        }
+      } else {
+        // Створення нового клієнта
+        const newClient = await createClient(clientData)
 
       if (newClient) {
         // Якщо є відділи, призначаємо їх
         if (clientForm.department_ids.length > 0 && newClient.id) {
-          try {
-            const departmentResults = await Promise.all(
-              clientForm.department_ids.map(deptId =>
-                supabase.from('client_departments').insert({
-                  client_id: newClient.id,
-                  department_id: deptId
-                })
-              )
-            )
+            const deptSuccess = await updateClientDepartments(newClient.id, clientForm.department_ids)
             
-            // Перевіряємо чи є помилки
-            const errors = departmentResults.filter(result => result.error)
-            if (errors.length > 0) {
-              console.error('Помилки при збереженні відділів:', errors)
-              setError('Клієнт створено, але не вдалося зберегти всі відділи')
-            }
-          } catch (deptError) {
-            console.error('Помилка при збереженні відділів:', deptError)
+            if (!deptSuccess) {
             setError('Клієнт створено, але не вдалося зберегти відділи')
           }
         }
 
         setSuccess(`Клієнт "${clientForm.legal_name}" успішно створено`)
-        setClientForm({
-          edrpou: '',
-          legal_name: '',
-          phone: '',
-          status: 'active',
-          company_group: '',
-          service_cost: '',
-          company_folder: '',
-          client_card: '',
-          address: '',
-          city: '',
-          kved_id: 0,
-          activity_type: '',
-          email: '',
-          type: '',
-          director_full_name: '',
-          gender: '',
-          iban: '',
-          bank_name: '',
-          department_ids: []
-        })
+          resetForm()
         setShowCreateModal(false)
         await loadData()
       } else {
         setError('Не вдалося створити клієнта')
+        }
       }
     } catch (err: any) {
-      setError(err.message || 'Помилка створення клієнта')
+      console.error('Помилка при збереженні клієнта:', err)
+      setError(err.message || (editingClientId ? 'Помилка оновлення клієнта' : 'Помилка створення клієнта'))
     }
   }
 
-  const handleViewClient = async (client: Client) => {
-    try {
-      const clientWithRelations = await getClientWithRelations(client.id)
-      setSelectedClient(clientWithRelations)
-      setShowViewModal(true)
-    } catch (err) {
-      console.error('Error loading client details:', err)
-      setError('Не вдалося завантажити дані клієнта')
-    }
+  const handleViewClient = (client: Client) => {
+    navigate(`/clients/${client.id}`)
   }
 
   const handleToggleStatusClick = (client: Client) => {
@@ -235,24 +618,6 @@ export default function ClientsPage() {
     }
   }
 
-  const formatDate = (dateString: string) => {
-    const date = new Date(dateString)
-    return date.toLocaleDateString('uk-UA', {
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-    })
-  }
-
-  const formatCurrency = (amount?: number) => {
-    if (!amount) return '-'
-    return new Intl.NumberFormat('uk-UA', {
-      style: 'currency',
-      currency: 'UAH',
-      minimumFractionDigits: 2
-    }).format(amount)
-  }
-
   const toggleDepartment = (departmentId: number) => {
     setClientForm(prev => ({
       ...prev,
@@ -260,6 +625,395 @@ export default function ClientsPage() {
         ? prev.department_ids.filter(id => id !== departmentId)
         : [...prev.department_ids, departmentId]
     }))
+  }
+
+  // Групування клієнтів за групою компаній
+  const groupClientsByCompanyGroup = (clients: ClientWithDepartments[]): Map<number | 'no-group', ClientWithDepartments[]> => {
+    const grouped = new Map<number | 'no-group', ClientWithDepartments[]>()
+    
+    clients.forEach(client => {
+      const groupId = client.group_company_id || 'no-group'
+      if (!grouped.has(groupId)) {
+        grouped.set(groupId, [])
+      }
+      grouped.get(groupId)!.push(client)
+    })
+    
+    return grouped
+  }
+
+  const toggleClientGroup = (groupId: number | 'no-group') => {
+    setExpandedClientGroups(prev => {
+      const newSet = new Set(prev)
+      if (newSet.has(groupId)) {
+        newSet.delete(groupId)
+      } else {
+        newSet.add(groupId)
+      }
+      return newSet
+    })
+  }
+
+  // Функції для роботи з призначенням задач
+  const handleAssignTasksClick = async (client: ClientWithDepartments) => {
+    setSelectedClientForTasks(client)
+    setError(null)
+    setSuccess(null)
+    
+    try {
+      // Завантажуємо призначені задачі для клієнта
+      const assigned = await getAssignedTasksByClient(client.id)
+      setAssignedTasks(assigned)
+      
+      // Завантажуємо доступні задачі та виконавців
+      if (user?.project_id) {
+        const [tasks, executors, roles] = await Promise.all([
+          getTasksByProject(user.project_id),
+          getUsersByProject(user.project_id),
+          getAllRoles()
+        ])
+        setAvailableTasks(tasks)
+        
+        // Знаходимо роль "Бухгалтер"
+        const accountantRole = roles.find(r => r.role_name === 'Бухгалтер')
+        const accountantRoleId = accountantRole?.id
+        
+        // Фільтруємо виконавців
+        let filteredExecutors: User[] = []
+        
+        if (isTeamLead && user?.id && accountantRoleId) {
+          // Для тім ліда: лише бухгалтери з його групи
+          filteredExecutors = executors.filter(u => 
+            u.role_id === accountantRoleId && u.group_id === user.id
+          )
+        } else {
+          // Для інших ролей: виключаємо адміністраторів та керівників виробництва
+          filteredExecutors = executors.filter(u => u.role_id !== 1 && u.role_id !== 2)
+        }
+        
+        setAvailableExecutors(filteredExecutors)
+      }
+      
+      setShowAssignTasksModal(true)
+    } catch (err: any) {
+      setError('Не вдалося завантажити дані для призначення задач')
+      console.error(err)
+    }
+  }
+
+  // Функція для отримання назви місяця
+  const getMonthName = (month: number) => {
+    const months = [
+      'Січень', 'Лютий', 'Березень', 'Квітень', 'Травень', 'Червень',
+      'Липень', 'Серпень', 'Вересень', 'Жовтень', 'Листопад', 'Грудень'
+    ]
+    return months[month - 1]
+  }
+
+  // Функція для витягування базової назви задачі (без суфіксів типу " - Січень")
+  const getBaseTaskName = (taskName: string): string => {
+    if (!taskName) return ''
+    // Видаляємо суфікси типу " - Січень", " - 1 квартал" тощо
+    const monthPattern = / - (Січень|Лютий|Березень|Квітень|Травень|Червень|Липень|Серпень|Вересень|Жовтень|Листопад|Грудень)$/
+    const quarterPattern = / - \d+ квартал$/
+    
+    let baseName = taskName
+    baseName = baseName.replace(monthPattern, '')
+    baseName = baseName.replace(quarterPattern, '')
+    
+    return baseName.trim()
+  }
+
+  // Функція для отримання доступних задач для вибору
+  const getAvailableTasksForSelect = (): Task[] => {
+    if (!assignedTasks || !availableTasks || availableTasks.length === 0) {
+      return []
+    }
+    
+    try {
+      // Отримуємо ID задач, які вже призначені цьому клієнту
+      const assignedTaskIds = new Set(assignedTasks.map(at => at.task_id))
+      
+      // Фільтруємо задачі, які ще не призначені
+      const unassignedTasks = availableTasks.filter(task => !assignedTaskIds.has(task.id))
+      
+      // Групуємо за базовою назвою та повертаємо унікальні групи
+      return Array.from(new Map(unassignedTasks
+        .filter(t => t.task_name) // Фільтруємо задачі без назви
+        .map(t => {
+          const baseName = getBaseTaskName(t.task_name || '')
+          return [baseName, t]
+        })).values())
+    } catch (error) {
+      console.error('Помилка фільтрації задач:', error)
+      return availableTasks || []
+    }
+  }
+
+  // Групуємо призначені задачі по базовій назві
+  const groupAssignedTasksByName = (tasks: AssignedTaskWithDetails[]): Map<string, AssignedTaskWithDetails[]> => {
+    const grouped = new Map<string, AssignedTaskWithDetails[]>()
+    
+    if (!tasks || tasks.length === 0) {
+      return grouped
+    }
+    
+    tasks.forEach(task => {
+      const baseName = task.task ? getBaseTaskName(task.task.task_name) : `Задача #${task.task_id}`
+      if (!grouped.has(baseName)) {
+        grouped.set(baseName, [])
+      }
+      grouped.get(baseName)!.push(task)
+    })
+    
+    return grouped
+  }
+
+  const toggleAssignedTaskGroup = (baseName: string) => {
+    setExpandedAssignedTaskGroups(prev => {
+      const newSet = new Set(prev)
+      if (newSet.has(baseName)) {
+        newSet.delete(baseName)
+      } else {
+        newSet.add(baseName)
+      }
+      return newSet
+    })
+  }
+
+  const handleUpdateExecutor = async (taskId: number, executorId: number) => {
+    if (!selectedClientForTasks) return
+    
+    // Знаходимо задачу для перевірки
+    const taskToUpdate = assignedTasks.find(t => t.id === taskId)
+    if (!taskToUpdate) {
+      console.error('Задачу не знайдено для оновлення:', taskId)
+      return
+    }
+    
+    // Зберігаємо початковий стан для відкату
+    const originalExecutorId = taskToUpdate.executor_id
+    
+    try {
+      // Оптимістичне оновлення тільки для конкретної задачі
+      setAssignedTasks(prev => prev.map(task => {
+        if (task.id === taskId) {
+          return { ...task, executor_id: executorId || null }
+        }
+        return task
+      }))
+      
+      const success = await updateAssignedTask(taskId, { executor_id: executorId || null })
+      if (!success) {
+        // Якщо помилка - відкатуємо зміни
+        setAssignedTasks(prev => prev.map(task => {
+          if (task.id === taskId) {
+            return { ...task, executor_id: originalExecutorId }
+          }
+          return task
+        }))
+        setError('Не вдалося оновити виконавця')
+      }
+      // Якщо успішно - залишаємо оптимістичне оновлення, не перезавантажуємо всі задачі
+    } catch (err: any) {
+      // Відкатуємо зміни при помилці
+      setAssignedTasks(prev => prev.map(task => {
+        if (task.id === taskId) {
+          return { ...task, executor_id: originalExecutorId }
+        }
+        return task
+      }))
+      setError('Не вдалося оновити виконавця')
+      console.error(err)
+    }
+  }
+
+  const handleToggleTaskActive = async (taskId: number, currentStatus: boolean) => {
+    if (!selectedClientForTasks) return
+    
+    // Знаходимо задачу для перевірки
+    const taskToUpdate = assignedTasks.find(t => t.id === taskId)
+    if (!taskToUpdate) {
+      console.error('Задачу не знайдено для оновлення:', taskId)
+      return
+    }
+    
+    const newStatus = !currentStatus
+    
+    try {
+      // Оптимістичне оновлення тільки для конкретної задачі
+      setAssignedTasks(prev => prev.map(task => {
+        if (task.id === taskId) {
+          return { ...task, is_active: newStatus }
+        }
+        return task
+      }))
+      
+      const success = await updateAssignedTask(taskId, { is_active: newStatus })
+      if (success) {
+        // Оновлюємо кількість задач у списку клієнтів
+        const tasksCount = await getActiveAssignedTasksCountForClients([selectedClientForTasks.id])
+        setClients(prev => prev.map(client => 
+          client.id === selectedClientForTasks.id 
+            ? { ...client, activeTasksCount: tasksCount.get(selectedClientForTasks.id) || 0 }
+            : client
+        ))
+      } else {
+        // Якщо помилка - відкатуємо зміни
+        setAssignedTasks(prev => prev.map(task => {
+          if (task.id === taskId) {
+            return { ...task, is_active: currentStatus }
+          }
+          return task
+        }))
+        setError('Не вдалося змінити статус задачі')
+      }
+      // Якщо успішно - залишаємо оптимістичне оновлення, не перезавантажуємо всі задачі
+    } catch (err: any) {
+      // Відкатуємо зміни при помилці
+      setAssignedTasks(prev => prev.map(task => {
+        if (task.id === taskId) {
+          return { ...task, is_active: currentStatus }
+        }
+        return task
+      }))
+      setError('Не вдалося змінити статус задачі')
+      console.error(err)
+    }
+  }
+
+  const handleUpdateTaskStatus = async (taskId: number, status: string) => {
+    try {
+      const success = await updateAssignedTask(taskId, { task_status: status || null })
+      if (success && selectedClientForTasks) {
+        const updated = await getAssignedTasksByClient(selectedClientForTasks.id)
+        setAssignedTasks(updated)
+      }
+    } catch (err: any) {
+      setError('Не вдалося оновити статус задачі')
+      console.error(err)
+    }
+  }
+
+  const handleUpdateCompletionDate = async (taskId: number, date: string) => {
+    try {
+      const isoDate = date ? parseDateToISO(date) : null
+      const success = await updateAssignedTask(taskId, { completion_date: isoDate || null })
+      if (success && selectedClientForTasks) {
+        const updated = await getAssignedTasksByClient(selectedClientForTasks.id)
+        setAssignedTasks(updated)
+      }
+    } catch (err: any) {
+      setError('Не вдалося оновити дату виконання')
+      console.error(err)
+    }
+  }
+
+  const handleUpdateCompletionTime = async (taskId: number, minutes: number | null) => {
+    try {
+      const success = await updateAssignedTask(taskId, { completion_time_minutes: minutes })
+      if (success && selectedClientForTasks) {
+        const updated = await getAssignedTasksByClient(selectedClientForTasks.id)
+        setAssignedTasks(updated)
+      }
+    } catch (err: any) {
+      setError('Не вдалося оновити час виконання')
+      console.error(err)
+    }
+  }
+
+  const handleTaskSelect = async (taskId: number) => {
+    setSelectedTaskId(taskId)
+    const task = availableTasks.find(t => t.id === taskId)
+    
+    if (!task) {
+      setSelectedTaskDates([])
+      return
+    }
+
+    // Отримуємо базову назву задачі
+    const baseName = getBaseTaskName(task.task_name)
+    
+    // Отримуємо всі задачі з такою ж базовою назвою (група задач)
+    const relatedTasks = availableTasks.filter(t => {
+      const tBaseName = getBaseTaskName(t.task_name)
+      return tBaseName === baseName
+    })
+
+    // Створюємо масив дат з обраної задачі/групи задач з визначенням місяця
+    const dates = relatedTasks.map(t => {
+      const dateStr = t.planned_date.split('T')[0]
+      const date = new Date(dateStr)
+      const month = date.getMonth() + 1 // Місяці від 1 до 12
+      return {
+        month,
+        date: dateStr,
+        executorId: 0,
+        isActive: true
+      }
+    })
+
+    setSelectedTaskDates(dates)
+  }
+
+  const handleAddAssignedTasks = async () => {
+    if (!selectedClientForTasks || selectedTaskId === 0 || selectedTaskDates.length === 0) {
+      setError('Оберіть задачу та заповніть всі поля')
+      return
+    }
+
+    setError(null)
+    setSuccess(null)
+
+    try {
+      // Отримуємо всі задачі з такою ж базовою назвою
+      const selectedTask = availableTasks.find(t => t.id === selectedTaskId)
+      if (!selectedTask) {
+        setError('Задачу не знайдено')
+        return
+      }
+
+      const baseName = getBaseTaskName(selectedTask.task_name)
+      const relatedTasks = availableTasks.filter(t => {
+        const tBaseName = getBaseTaskName(t.task_name)
+        return tBaseName === baseName
+      })
+
+      // Створюємо призначені задачі для кожної дати з відповідною task_id
+      const tasksToCreate = selectedTaskDates.map((dateItem) => {
+        const relatedTask = relatedTasks.find(t => t.planned_date.split('T')[0] === dateItem.date)
+        return {
+          task_id: relatedTask?.id || selectedTaskId,
+          client_id: selectedClientForTasks.id,
+          department_id: selectedClientForTasks.departments?.[0]?.id || null,
+          group_id: user?.group_id || null,
+          executor_id: dateItem.executorId || null,
+          is_active: dateItem.isActive
+        }
+      })
+
+      const created = await createMultipleAssignedTasks(tasksToCreate)
+      
+      if (created.length > 0) {
+        setSuccess(`Успішно призначено ${created.length} ${created.length === 1 ? 'задачу' : created.length < 5 ? 'задачі' : 'задач'}`)
+        // Оновлюємо список призначених задач
+        const updated = await getAssignedTasksByClient(selectedClientForTasks.id)
+        setAssignedTasks(updated)
+        // Оновлюємо кількість задач у списку клієнтів
+        await loadData()
+        // Очищаємо форму
+        setSelectedTaskId(0)
+        setSelectedTaskDates([])
+        // Оновлюємо список доступних задач - видаляємо ті, що вже призначені
+        // (це відбудеться автоматично через фільтрацію в render, але можна явно оновити)
+        // availableTasks залишається незмінним, фільтрація відбувається в render
+      } else {
+        setError('Не вдалося призначити задачі')
+      }
+    } catch (err: any) {
+      setError(err.message || 'Помилка призначення задач')
+      console.error(err)
+    }
   }
 
   if (loading) {
@@ -274,13 +1028,34 @@ export default function ClientsPage() {
     <div className="admin-page">
       <div className="admin-header">
         <h2>Клієнти</h2>
-        <button className="btn-primary" onClick={() => setShowCreateModal(true)}>
+        <div style={{ display: 'flex', gap: '12px' }}>
+          <button className="btn-primary" onClick={() => {
+            resetForm()
+            setShowCreateModal(true)
+          }}>
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <line x1="12" y1="5" x2="12" y2="19"></line>
             <line x1="5" y1="12" x2="19" y2="12"></line>
           </svg>
           Створити клієнта
         </button>
+          <button 
+            className="btn-primary" 
+            onClick={() => {
+              setShowAllGroupsModal(true)
+              setError(null)
+              setSuccess(null)
+              handleCancelEditGroup()
+            }}
+          >
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+              <line x1="9" y1="3" x2="9" y2="21"></line>
+              <line x1="9" y1="9" x2="21" y2="9"></line>
+            </svg>
+            Групи компаній
+        </button>
+        </div>
       </div>
 
       {error && (
@@ -296,9 +1071,78 @@ export default function ClientsPage() {
       )}
 
       <div className="table-container">
-        <table className="admin-table">
+        {clients.length === 0 ? (
+          <div style={{ textAlign: 'center', padding: '40px' }}>
+            Немає клієнтів
+          </div>
+        ) : (
+          Array.from(groupClientsByCompanyGroup(clients).entries()).map(([groupId, groupClients]) => {
+            const isExpanded = expandedClientGroups.has(groupId)
+            const groupName = groupId === 'no-group' 
+              ? 'Клієнти без групи' 
+              : groupCompanies.find(gc => gc.id === groupId)?.group_name || `Група #${groupId}`
+            const clientsCount = groupClients.length
+            
+            return (
+              <div
+                key={groupId}
+                style={{
+                  border: '1px solid #e2e8f0',
+                  borderRadius: '8px',
+                  marginBottom: '12px',
+                  overflow: 'hidden',
+                  background: '#ffffff'
+                }}
+              >
+                {/* Заголовок групи */}
+                <div
+                  onClick={() => toggleClientGroup(groupId)}
+                  style={{
+                    padding: '16px',
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    background: isExpanded ? '#f7fafc' : '#ffffff',
+                    transition: 'background-color 0.2s',
+                    borderBottom: isExpanded ? '1px solid #e2e8f0' : 'none'
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flex: 1 }}>
+                    <svg
+                      width="20"
+                      height="20"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      style={{
+                        transform: isExpanded ? 'rotate(90deg)' : 'rotate(0deg)',
+                        transition: 'transform 0.2s'
+                      }}
+                    >
+                      <polyline points="9 18 15 12 9 6"></polyline>
+                    </svg>
+                    <div>
+                      <div style={{ fontWeight: '600', fontSize: '16px', color: '#2d3748' }}>
+                        {groupName}
+                      </div>
+                      <div style={{ fontSize: '14px', color: '#718096', marginTop: '4px' }}>
+                        {clientsCount} {clientsCount === 1 ? 'клієнт' : clientsCount < 5 ? 'клієнти' : 'клієнтів'}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Розкритий список клієнтів */}
+                {isExpanded && (
+                  <div style={{ padding: '16px', background: '#ffffff' }}>
+                    <table className="admin-table" style={{ margin: 0 }}>
           <thead>
             <tr>
+                          <th style={{ width: '80px', textAlign: 'center' }}>Задачі</th>
               <th>ЕДРПОУ</th>
               <th>Юр. назва</th>
               <th>Телефон</th>
@@ -312,15 +1156,57 @@ export default function ClientsPage() {
             </tr>
           </thead>
           <tbody>
-            {clients.length === 0 ? (
-              <tr>
-                <td colSpan={10} style={{ textAlign: 'center', padding: '40px' }}>
-                  Немає клієнтів
-                </td>
-              </tr>
-            ) : (
-              clients.map((client) => (
+                        {groupClients.map((client) => (
                 <tr key={client.id}>
+                            <td style={{ textAlign: 'center', padding: '8px' }}>
+                              {client.activeTasksCount === undefined || client.activeTasksCount === 0 ? (
+                                <div
+                                  style={{
+                                    display: 'inline-flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'center',
+                                    width: '32px',
+                                    height: '32px',
+                                    borderRadius: '50%',
+                                    backgroundColor: '#fee2e2',
+                                    color: '#dc2626',
+                                    cursor: 'pointer',
+                                    transition: 'all 0.2s'
+                                  }}
+                                  title="Немає призначених задач"
+                                >
+                                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                    <circle cx="12" cy="12" r="10"></circle>
+                                    <line x1="12" y1="8" x2="12" y2="12"></line>
+                                    <line x1="12" y1="16" x2="12.01" y2="16"></line>
+                                  </svg>
+                                </div>
+                              ) : (
+                                <div
+                                  style={{
+                                    display: 'inline-flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'center',
+                                    gap: '6px',
+                                    padding: '6px 12px',
+                                    borderRadius: '16px',
+                                    backgroundColor: '#f3f4f6',
+                                    color: '#6b7280',
+                                    fontSize: '13px',
+                                    fontWeight: '500',
+                                    cursor: 'pointer',
+                                    transition: 'all 0.2s'
+                                  }}
+                                  title={`${client.activeTasksCount} ${client.activeTasksCount === 1 ? 'призначена задача' : client.activeTasksCount < 5 ? 'призначені задачі' : 'призначених задач'}`}
+                                >
+                                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                    <path d="M9 11l3 3L22 4"></path>
+                                    <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path>
+                                  </svg>
+                                  <span>{client.activeTasksCount}</span>
+                                </div>
+                              )}
+                            </td>
                   <td>{client.edrpou || '-'}</td>
                   <td>{client.legal_name}</td>
                   <td>{client.phone || '-'}</td>
@@ -349,14 +1235,25 @@ export default function ClientsPage() {
                     )}
                   </td>
                   <td>
-                    <span className={`status-badge ${client.status === 'active' ? 'status-active' : 'status-inactive'}`}>
-                      {client.status === 'active' ? 'Активний' : client.status === 'inactive' ? 'Неактивний' : 'Не вказано'}
+                    <span className={`status-badge ${getStatusBadgeClass(client.status)}`}>
+                      {getStatusText(client.status)}
                     </span>
                   </td>
                   <td>{formatCurrency(client.service_cost)}</td>
                   <td>{formatDate(client.created_at)}</td>
                   <td>
                     <div className="action-buttons">
+                                <button
+                                  className="btn-action btn-edit"
+                                  onClick={() => handleEditClient(client)}
+                                  title="Редагувати"
+                                >
+                                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                    <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path>
+                                    <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path>
+                                  </svg>
+                                </button>
+                                {!isTeamLead && (
                       <button
                         className={`btn-action btn-toggle ${client.status === 'active' ? 'inactive' : 'active'}`}
                         onClick={() => handleToggleStatusClick(client)}
@@ -367,6 +1264,7 @@ export default function ClientsPage() {
                           <line x1="12" y1="2" x2="12" y2="12"></line>
                         </svg>
                       </button>
+                                )}
                       <button
                         className="btn-action btn-view"
                         onClick={() => handleViewClient(client)}
@@ -377,21 +1275,47 @@ export default function ClientsPage() {
                           <circle cx="12" cy="12" r="3"></circle>
                         </svg>
                       </button>
+                                <button
+                                  className="btn-action"
+                                  onClick={() => handleAssignTasksClick(client)}
+                                  title="Призначити задачі"
+                                  style={{ color: '#4299e1' }}
+                                >
+                                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                    <rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect>
+                                    <line x1="16" y1="2" x2="16" y2="6"></line>
+                                    <line x1="8" y1="2" x2="8" y2="6"></line>
+                                    <line x1="3" y1="10" x2="21" y2="10"></line>
+                                    <line x1="12" y1="16" x2="12" y2="12"></line>
+                                    <line x1="12" y1="8" x2="12" y2="12"></line>
+                        </svg>
+                      </button>
                     </div>
                   </td>
                 </tr>
-              ))
-            )}
+                        ))}
           </tbody>
         </table>
+                  </div>
+                )}
+              </div>
+            )
+          })
+        )}
       </div>
 
       {showCreateModal && (
-        <div className="modal-overlay" onClick={() => setShowCreateModal(false)}>
+        <div className="modal-overlay" onClick={() => {
+          setShowCreateModal(false)
+          resetForm()
+        }}>
           <div className="modal-content modal-large" onClick={(e) => e.stopPropagation()}>
             <div className="modal-header">
-              <h3>Створити клієнта</h3>
-              <button className="modal-close" onClick={() => setShowCreateModal(false)}>
+              <h3>{editingClientId ? 'Редагувати клієнта' : 'Створити клієнта'}</h3>
+              <button className="modal-close" onClick={() => {
+                setShowCreateModal(false)
+                resetForm()
+              }}>
                 ×
               </button>
             </div>
@@ -448,14 +1372,101 @@ export default function ClientsPage() {
                     <option value="inactive">Неактивний</option>
                   </select>
                 </div>
-                <div className="form-group">
+                <div className="form-group" style={{ position: 'relative' }}>
                   <label>Група компаній</label>
-                  <input
-                    type="text"
-                    value={clientForm.company_group}
-                    onChange={(e) => setClientForm({ ...clientForm, company_group: e.target.value })}
-                    placeholder="Введіть групу компаній"
-                  />
+                  <div style={{ position: 'relative' }}>
+                    <input
+                      ref={groupCompanyInputRef}
+                      type="text"
+                      value={groupCompanySearch}
+                      onChange={(e) => {
+                        setGroupCompanySearch(e.target.value)
+                        setShowGroupCompanyDropdown(true)
+                        if (e.target.value === '') {
+                          setClientForm({ ...clientForm, group_company_id: 0 })
+                        }
+                      }}
+                      onFocus={() => setShowGroupCompanyDropdown(true)}
+                      placeholder="Введіть назву групи компаній або створіть нову"
+                      style={{ width: '100%' }}
+                    />
+                    {showGroupCompanyDropdown && (
+                      <div
+                        ref={groupCompanyDropdownRef}
+                        style={{
+                          position: 'absolute',
+                          top: '100%',
+                          left: 0,
+                          right: 0,
+                          background: 'white',
+                          border: '1px solid #cbd5e0',
+                          borderRadius: '8px',
+                          boxShadow: '0 4px 6px rgba(0, 0, 0, 0.1)',
+                          zIndex: 1000,
+                          maxHeight: '300px',
+                          overflowY: 'auto',
+                          marginTop: '4px'
+                        }}
+                      >
+                        {filteredGroupCompanies.length > 0 ? (
+                          filteredGroupCompanies.map((group) => (
+                            <div
+                              key={group.id}
+                              onClick={() => handleSelectGroupCompany(group)}
+                              style={{
+                                padding: '12px 16px',
+                                cursor: 'pointer',
+                                borderBottom: '1px solid #e2e8f0',
+                                transition: 'background-color 0.2s'
+                              }}
+                              onMouseEnter={(e) => {
+                                e.currentTarget.style.backgroundColor = '#f7fafc'
+                              }}
+                              onMouseLeave={(e) => {
+                                e.currentTarget.style.backgroundColor = 'white'
+                              }}
+                            >
+                              {group.group_name}
+                            </div>
+                          ))
+                        ) : (
+                          <div style={{ padding: '12px 16px', color: '#718096' }}>
+                            {groupCompanySearch.trim() ? 'Нічого не знайдено' : 'Немає груп компаній'}
+                          </div>
+                        )}
+                        <div
+                          onClick={() => {
+                            setShowCreateGroupModal(true)
+                            setShowGroupCompanyDropdown(false)
+                          }}
+                          style={{
+                            padding: '12px 16px',
+                            cursor: 'pointer',
+                            borderTop: '2px solid #e2e8f0',
+                            background: '#f0f4ff',
+                            fontWeight: '600',
+                            color: '#4299e1',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '8px',
+                            transition: 'background-color 0.2s'
+                          }}
+                          onMouseEnter={(e) => {
+                            e.currentTarget.style.backgroundColor = '#e6f2ff'
+                          }}
+                          onMouseLeave={(e) => {
+                            e.currentTarget.style.backgroundColor = '#f0f4ff'
+                          }}
+                        >
+                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                            <line x1="12" y1="5" x2="12" y2="19"></line>
+                            <line x1="5" y1="12" x2="19" y2="12"></line>
+                          </svg>
+                          Створити нову групу "{groupCompanySearch || 'компаній'}"
+                        </div>
+                      </div>
+                    )}
+                  </div>
                 </div>
               </div>
               <div className="form-row">
@@ -568,6 +1579,31 @@ export default function ClientsPage() {
               {departments.length > 0 && (
                 <div className="form-group">
                   <label>Відділи обслуговування</label>
+                  {isTeamLead ? (
+                    <div style={{
+                      padding: '12px 16px',
+                      background: '#f7fafc',
+                      border: '2px solid #e2e8f0',
+                      borderRadius: '8px',
+                      color: '#718096',
+                      fontSize: '14px'
+                    }}>
+                      {teamLeadDepartments.length > 0 ? (
+                        <div>
+                          <div style={{ marginBottom: '8px', fontWeight: '500', color: '#2d3748' }}>
+                            Клієнт автоматично буде призначений до вашого відділу:
+                          </div>
+                          <div style={{ color: '#4299e1', fontWeight: '600' }}>
+                            {teamLeadDepartments.map(dept => dept.department_name).join(', ')}
+                          </div>
+                        </div>
+                      ) : (
+                        <div style={{ color: '#e53e3e' }}>
+                          У вас немає відділу. Зверніться до керівника виробництва для призначення відділу.
+                        </div>
+                      )}
+                    </div>
+                  ) : (
                   <div style={{ display: 'flex', flexWrap: 'wrap', gap: '12px', marginTop: '8px' }}>
                     {departments.map((dept) => (
                       <label
@@ -593,14 +1629,18 @@ export default function ClientsPage() {
                       </label>
                     ))}
                   </div>
+                  )}
                 </div>
               )}
               <div className="modal-actions">
-                <button type="button" className="btn-secondary" onClick={() => setShowCreateModal(false)}>
+                <button type="button" className="btn-secondary" onClick={() => {
+                  setShowCreateModal(false)
+                  resetForm()
+                }}>
                   Скасувати
                 </button>
                 <button type="submit" className="btn-primary">
-                  Створити
+                  {editingClientId ? 'Зберегти зміни' : 'Створити'}
                 </button>
               </div>
             </form>
@@ -662,178 +1702,828 @@ export default function ClientsPage() {
         </div>
       )}
 
-      {showViewModal && selectedClient && (
-        <div className="modal-overlay" onClick={() => setShowViewModal(false)}>
-          <div className="modal-content modal-large" onClick={(e) => e.stopPropagation()}>
+      {showCreateGroupModal && (
+        <div className="modal-overlay" onClick={() => { setShowCreateGroupModal(false); setNewGroupName(''); }}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
             <div className="modal-header">
-              <h3>Карточка клієнта: {selectedClient.legal_name}</h3>
-              <button className="modal-close" onClick={() => setShowViewModal(false)}>
+              <h3>Створити групу компаній</h3>
+              <button className="modal-close" onClick={() => { setShowCreateGroupModal(false); setNewGroupName(''); }}>
                 ×
               </button>
             </div>
-            <div className="project-card">
-              <div className="card-section">
-                <h4>Основна інформація</h4>
-                <div className="card-row">
-                  <div className="card-field">
-                    <label>ЕДРПОУ:</label>
-                    <span>{selectedClient.edrpou || '-'}</span>
+            <div style={{ padding: '24px' }}>
+              <div className="form-group">
+                <label>Назва групи компаній *</label>
+                <input
+                  type="text"
+                  value={newGroupName}
+                  onChange={(e) => setNewGroupName(e.target.value)}
+                  placeholder="Введіть назву групи компаній"
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault()
+                      handleCreateGroupCompany()
+                    }
+                  }}
+                  autoFocus
+                />
+              </div>
+              <div className="modal-actions">
+                <button 
+                  type="button" 
+                  className="btn-secondary" 
+                  onClick={() => { setShowCreateGroupModal(false); setNewGroupName(''); }}
+                >
+                  Скасувати
+                </button>
+                <button 
+                  type="button" 
+                  className="btn-primary"
+                  onClick={handleCreateGroupCompany}
+                  disabled={!newGroupName.trim()}
+                >
+                  Створити
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showAllGroupsModal && (
+        <div className="modal-overlay" onClick={() => {
+          setShowAllGroupsModal(false)
+          handleCancelEditGroup()
+        }}>
+          <div className="modal-content modal-large" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3>Групи компаній</h3>
+              <button className="modal-close" onClick={() => {
+                setShowAllGroupsModal(false)
+                handleCancelEditGroup()
+              }}>
+                ×
+              </button>
+    </div>
+            <div style={{ padding: '24px', maxHeight: '70vh', overflowY: 'auto' }}>
+              {/* Форма створення нової групи */}
+              <div style={{ 
+                marginBottom: '24px', 
+                padding: '16px', 
+                border: '1px solid #e2e8f0', 
+                borderRadius: '8px',
+                background: '#f7fafc'
+              }}>
+                <h4 style={{ marginBottom: '12px', fontSize: '16px', fontWeight: '600', color: '#2d3748' }}>
+                  Додати нову групу
+                </h4>
+                <form onSubmit={(e) => {
+                  e.preventDefault()
+                  handleCreateGroupInModal()
+                }} style={{ display: 'flex', gap: '12px', alignItems: 'flex-end' }}>
+                  <div style={{ flex: 1 }}>
+                    <label style={{ display: 'block', marginBottom: '6px', fontSize: '14px', fontWeight: '500', color: '#4a5568' }}>
+                      Назва групи компаній *
+                    </label>
+                    <input
+                      type="text"
+                      value={newGroupName}
+                      onChange={(e) => setNewGroupName(e.target.value)}
+                      placeholder="Введіть назву групи компаній"
+                      required
+                      style={{
+                        width: '100%',
+                        padding: '8px 12px',
+                        border: '1px solid #cbd5e0',
+                        borderRadius: '4px',
+                        fontSize: '16px'
+                      }}
+                    />
                   </div>
-                  <div className="card-field">
-                    <label>Юр. назва:</label>
-                    <span>{selectedClient.legal_name}</span>
-                  </div>
-                </div>
-                <div className="card-row">
-                  <div className="card-field">
-                    <label>Телефон:</label>
-                    <span>{selectedClient.phone || '-'}</span>
-                  </div>
-                  <div className="card-field">
-                    <label>Email:</label>
-                    <span>{selectedClient.email || '-'}</span>
-                  </div>
-                </div>
-                <div className="card-row">
-                  <div className="card-field">
-                    <label>Статус:</label>
-                    <span className={`status-badge ${selectedClient.status === 'active' ? 'status-active' : 'status-inactive'}`}>
-                      {selectedClient.status === 'active' ? 'Активний' : selectedClient.status === 'inactive' ? 'Неактивний' : 'Не вказано'}
-                    </span>
-                  </div>
-                  <div className="card-field">
-                    <label>Група компаній:</label>
-                    <span>{selectedClient.company_group || '-'}</span>
-                  </div>
-                </div>
-                <div className="card-row">
-                  <div className="card-field">
-                    <label>Вартість обслуговування:</label>
-                    <span>{formatCurrency(selectedClient.service_cost)}</span>
-                  </div>
-                  <div className="card-field">
-                    <label>Дата створення:</label>
-                    <span>{formatDate(selectedClient.created_at)}</span>
-                  </div>
-                </div>
+                  <button 
+                    type="submit" 
+                    className="btn-primary"
+                    style={{ padding: '8px 20px', whiteSpace: 'nowrap' }}
+                  >
+                    Створити
+                  </button>
+                </form>
               </div>
 
-              <div className="card-section">
-                <h4>Адреса</h4>
-                <div className="card-row">
-                  <div className="card-field">
-                    <label>Місто:</label>
-                    <span>{selectedClient.city || '-'}</span>
-                  </div>
-                  <div className="card-field">
-                    <label>Адреса:</label>
-                    <span>{selectedClient.address || '-'}</span>
-                  </div>
-                </div>
-              </div>
-
-              <div className="card-section">
-                <h4>Діяльність</h4>
-                <div className="card-row">
-                  <div className="card-field">
-                    <label>КВЕД:</label>
-                    <span>{selectedClient.kved ? `${selectedClient.kved.code} - ${selectedClient.kved.description}` : '-'}</span>
-                  </div>
-                  <div className="card-field">
-                    <label>Вид діяльності:</label>
-                    <span>{selectedClient.activity_type || '-'}</span>
-                  </div>
-                </div>
-                <div className="card-row">
-                  <div className="card-field">
-                    <label>Тип:</label>
-                    <span>{selectedClient.type || '-'}</span>
-                  </div>
-                </div>
-              </div>
-
-              <div className="card-section">
-                <h4>Керівництво</h4>
-                <div className="card-row">
-                  <div className="card-field">
-                    <label>ПІБ директора:</label>
-                    <span>{selectedClient.director_full_name || '-'}</span>
-                  </div>
-                  <div className="card-field">
-                    <label>Стать:</label>
-                    <span>
-                      {selectedClient.gender === 'male' ? 'Чоловік' : 
-                       selectedClient.gender === 'female' ? 'Жінка' : '-'}
-                    </span>
-                  </div>
-                </div>
-              </div>
-
-              <div className="card-section">
-                <h4>Банківські реквізити</h4>
-                <div className="card-row">
-                  <div className="card-field">
-                    <label>IBAN:</label>
-                    <span>{selectedClient.iban || '-'}</span>
-                  </div>
-                  <div className="card-field">
-                    <label>Назва банку:</label>
-                    <span>{selectedClient.bank_name || '-'}</span>
-                  </div>
-                </div>
-              </div>
-
-              {selectedClient.departments && selectedClient.departments.length > 0 && (
-                <div className="card-section">
-                  <h4>Відділи обслуговування</h4>
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
-                    {selectedClient.departments.map((dept) => (
-                      <span 
-                        key={dept.id}
-                        className="status-badge"
-                        style={{ 
-                          background: '#e6f2ff', 
-                          color: '#2c5282',
-                          fontSize: '12px',
-                          padding: '6px 12px'
-                        }}
-                      >
-                        {dept.department_name}
-                      </span>
-                    ))}
-                  </div>
+              {/* Список груп компаній */}
+              {groupCompanies.length === 0 ? (
+                <p style={{ textAlign: 'center', padding: '40px', color: '#718096' }}>
+                  Немає груп компаній. Створіть першу групу вище.
+                </p>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                  {groupCompanies.map((group) => (
+                    <div
+                      key={group.id}
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '12px',
+                        padding: '12px',
+                        border: '1px solid #e2e8f0',
+                        borderRadius: '8px',
+                        background: editingGroupId === group.id ? '#f7fafc' : '#ffffff',
+                        transition: 'all 0.2s'
+                      }}
+                    >
+                      {editingGroupId === group.id ? (
+                        <>
+                          <input
+                            type="text"
+                            value={editingGroupName}
+                            onChange={(e) => setEditingGroupName(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') {
+                                handleSaveGroupName(group.id)
+                              } else if (e.key === 'Escape') {
+                                handleCancelEditGroup()
+                              }
+                            }}
+                            autoFocus
+                            style={{
+                              flex: 1,
+                              padding: '8px 12px',
+                              border: '2px solid #4299e1',
+                              borderRadius: '4px',
+                              fontSize: '16px'
+                            }}
+                          />
+                          <button
+                            className="btn-primary"
+                            onClick={() => handleSaveGroupName(group.id)}
+                            style={{ padding: '8px 16px', whiteSpace: 'nowrap' }}
+                          >
+                            Зберегти
+                          </button>
+                          <button
+                            className="btn-secondary"
+                            onClick={handleCancelEditGroup}
+                            style={{ padding: '8px 16px', whiteSpace: 'nowrap' }}
+                          >
+                            Скасувати
+                          </button>
+                        </>
+                      ) : (
+                        <>
+                          <span style={{ flex: 1, fontSize: '16px', fontWeight: '500', color: '#2d3748' }}>
+                            {group.group_name}
+                          </span>
+                          <button
+                            className="btn-action btn-edit"
+                            onClick={() => handleEditGroupName(group)}
+                            title="Змінити назву групи компаній"
+                          >
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="18" height="18">
+                              <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path>
+                              <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path>
+                            </svg>
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  ))}
                 </div>
               )}
+            </div>
+            <div className="modal-actions">
+              <button 
+                type="button" 
+                className="btn-secondary" 
+                onClick={() => {
+                  setShowAllGroupsModal(false)
+                  handleCancelEditGroup()
+                }}
+              >
+                Закрити
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
-              {selectedClient.employees && selectedClient.employees.length > 0 && (
-                <div className="card-section">
-                  <h4>Закріплені працівники</h4>
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
-                    {selectedClient.employees.map((emp) => {
-                      const fullName = [emp.surname, emp.name, emp.middle_name].filter(Boolean).join(' ') || '-'
+      {/* Модальне вікно призначення задач */}
+      {showAssignTasksModal && selectedClientForTasks && (
+        <div className="modal-overlay" onClick={() => {
+          setShowAssignTasksModal(false)
+          setSelectedClientForTasks(null)
+          setSelectedTaskId(0)
+          setSelectedTaskDates([])
+        }}>
+          <div className="modal-content modal-large" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3>Призначені задачі: {selectedClientForTasks.legal_name}</h3>
+              <button className="modal-close" onClick={() => {
+                setShowAssignTasksModal(false)
+                setSelectedClientForTasks(null)
+                setSelectedTaskId(0)
+                setSelectedTaskDates([])
+              }}>
+                ×
+              </button>
+            </div>
+            <div style={{ padding: '24px', maxHeight: '80vh', overflowY: 'auto' }}>
+              {/* Список призначених задач */}
+              {assignedTasks.length > 0 && (
+                <div style={{ marginBottom: '24px' }}>
+                  <h4 style={{ marginBottom: '12px', fontSize: '16px', fontWeight: '600', color: '#2d3748' }}>
+                    Вже призначені задачі
+                  </h4>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                    {Array.from(groupAssignedTasksByName(assignedTasks).entries()).map(([baseName, groupTasks]: [string, AssignedTaskWithDetails[]]) => {
+                      const isExpanded = expandedAssignedTaskGroups.has(baseName)
+                      
                       return (
-                        <span 
-                          key={emp.id}
-                          className="status-badge"
-                          style={{ 
-                            background: '#f0f4ff', 
-                            color: '#4c51bf',
-                            fontSize: '12px',
-                            padding: '6px 12px'
+                        <div
+                          key={baseName}
+                          style={{
+                            border: '1px solid #e2e8f0',
+                            borderRadius: '8px',
+                            marginBottom: '12px',
+                            overflow: 'hidden',
+                            background: '#ffffff'
                           }}
                         >
-                          {fullName}
-                        </span>
+                          {/* Заголовок групи */}
+                          <div
+                            onClick={() => toggleAssignedTaskGroup(baseName)}
+                            style={{
+                              padding: '16px',
+                              cursor: 'pointer',
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'space-between',
+                              background: isExpanded ? '#f7fafc' : '#ffffff',
+                              transition: 'background-color 0.2s',
+                              borderBottom: isExpanded ? '1px solid #e2e8f0' : 'none'
+                            }}
+                          >
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flex: 1 }}>
+                              <span style={{ fontSize: '18px', transition: 'transform 0.2s', transform: isExpanded ? 'rotate(90deg)' : 'rotate(0deg)' }}>
+                                ▶
+                              </span>
+                              <div>
+                                <div style={{ fontWeight: '600', color: '#2d3748', fontSize: '16px' }}>
+                                  {baseName}
+                                </div>
+                                <div style={{ fontSize: '13px', color: '#718096', marginTop: '4px' }}>
+                                  {groupTasks.length} {groupTasks.length === 1 ? 'задача' : groupTasks.length < 5 ? 'задачі' : 'задач'}
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Розгорнутий список дат */}
+                          {isExpanded && (
+                            <div style={{ padding: '16px', background: '#ffffff' }}>
+                              <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                                {groupTasks.map((assigned: AssignedTaskWithDetails) => {
+                                  const isEditing = editingAssignedTaskId === assigned.id
+                                  
+                                  return (
+                                    <div
+                                      key={assigned.id}
+                                      style={{
+                                        padding: '16px',
+                                        border: '1px solid #e2e8f0',
+                                        borderRadius: '8px',
+                                        background: assigned.is_active ? '#ffffff' : '#f7fafc',
+                                        display: 'flex',
+                                        flexDirection: 'column',
+                                        gap: '12px',
+                                        position: 'relative'
+                                      }}
+                                    >
+                                      {/* Кнопка редагування */}
+                                      <button
+                                        onClick={() => {
+                                          if (isEditing) {
+                                            setEditingAssignedTaskId(null)
+                                          } else {
+                                            setEditingAssignedTaskId(assigned.id)
+                                          }
+                                        }}
+                                        style={{
+                                          position: 'absolute',
+                                          top: '12px',
+                                          right: '12px',
+                                          background: 'transparent',
+                                          border: 'none',
+                                          cursor: 'pointer',
+                                          padding: '4px',
+                                          display: 'flex',
+                                          alignItems: 'center',
+                                          justifyContent: 'center',
+                                          borderRadius: '4px',
+                                          transition: 'background-color 0.2s'
+                                        }}
+                                        onMouseEnter={(e) => {
+                                          e.currentTarget.style.backgroundColor = '#f7fafc'
+                                        }}
+                                        onMouseLeave={(e) => {
+                                          e.currentTarget.style.backgroundColor = 'transparent'
+                                        }}
+                                        title={isEditing ? 'Закрити редагування' : 'Редагувати'}
+                                      >
+                                        <svg
+                                          width="18"
+                                          height="18"
+                                          viewBox="0 0 24 24"
+                                          fill="none"
+                                          stroke={isEditing ? '#ff6b35' : '#718096'}
+                                          strokeWidth="2"
+                                          strokeLinecap="round"
+                                          strokeLinejoin="round"
+                                        >
+                                          <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path>
+                                          <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path>
+                                        </svg>
+                                      </button>
+
+                                      {/* Перший рядок: Планова дата, Виконавець, Активна */}
+                                      <div style={{ 
+                                        display: 'grid', 
+                                        gridTemplateColumns: 'auto 1fr auto',
+                                        gap: '12px',
+                                        alignItems: 'center',
+                                        paddingRight: '40px'
+                                      }}>
+                                        {/* Планова дата */}
+                                        <div style={{ fontWeight: '500', color: '#2d3748', fontSize: '14px', minWidth: '120px' }}>
+                                          План: {assigned.task?.planned_date ? formatDateToUA(assigned.task.planned_date.split('T')[0]) : '-'}
+                                        </div>
+                                        
+                                        {/* Виконавець */}
+                                        {isEditing ? (
+                                          <select
+                                            key={`executor-select-${assigned.id}`}
+                                            value={assigned.executor_id || 0}
+                                            onChange={(e) => {
+                                              e.stopPropagation()
+                                              const executorId = Number(e.target.value)
+                                              handleUpdateExecutor(assigned.id, executorId)
+                                            }}
+                                            onClick={(e) => e.stopPropagation()}
+                                            style={{
+                                              padding: '6px 10px',
+                                              border: '2px solid #e2e8f0',
+                                              borderRadius: '6px',
+                                              fontSize: '14px',
+                                              transition: 'all 0.2s'
+                                            }}
+                                            onFocus={(e) => {
+                                              e.stopPropagation()
+                                              e.currentTarget.style.borderColor = '#ff6b35'
+                                              e.currentTarget.style.boxShadow = '0 0 0 3px rgba(255, 107, 53, 0.1)'
+                                            }}
+                                            onBlur={(e) => {
+                                              e.currentTarget.style.borderColor = '#e2e8f0'
+                                              e.currentTarget.style.boxShadow = 'none'
+                                            }}
+                                          >
+                                            <option value={0}>-- Оберіть виконавця --</option>
+                                            {availableExecutors.map((executor) => {
+                                              const fullName = [executor.surname, executor.name, executor.middle_name].filter(Boolean).join(' ') || executor.email
+                                              return (
+                                                <option key={executor.id} value={executor.id}>
+                                                  {fullName}
+                                                </option>
+                                              )
+                                            })}
+                                          </select>
+                                        ) : (
+                                          <div style={{
+                                            padding: '6px 10px',
+                                            fontSize: '14px',
+                                            color: assigned.executor 
+                                              ? '#2d3748' 
+                                              : '#718096',
+                                            backgroundColor: '#f7fafc',
+                                            borderRadius: '6px',
+                                            border: '1px solid #e2e8f0'
+                                          }}>
+                                            {assigned.executor 
+                                              ? [assigned.executor.surname, assigned.executor.name, assigned.executor.middle_name].filter(Boolean).join(' ') || assigned.executor.email
+                                              : 'Не призначено'}
+                                          </div>
+                                        )}
+
+                                        {/* Чекбокс активності */}
+                                        {isEditing ? (
+                                          <label 
+                                            style={{ 
+                                              display: 'flex', 
+                                              alignItems: 'center', 
+                                              gap: '8px', 
+                                              cursor: 'pointer',
+                                              whiteSpace: 'nowrap'
+                                            }}
+                                            onClick={(e) => e.stopPropagation()}
+                                          >
+                                            <input
+                                              key={`active-checkbox-${assigned.id}-${assigned.is_active}`}
+                                              type="checkbox"
+                                              checked={assigned.is_active}
+                                              onChange={(e) => {
+                                                e.stopPropagation()
+                                                e.preventDefault()
+                                                handleToggleTaskActive(assigned.id, assigned.is_active)
+                                              }}
+                                              onClick={(e) => {
+                                                e.stopPropagation()
+                                              }}
+                                              style={{ width: '18px', height: '18px', cursor: 'pointer' }}
+                                            />
+                                            <span style={{ fontSize: '14px', color: '#4a5568', fontWeight: '500' }}>Активна</span>
+                                          </label>
+                                        ) : (
+                                          <div style={{
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            gap: '8px',
+                                            padding: '6px 10px',
+                                            fontSize: '14px',
+                                            color: '#4a5568',
+                                            fontWeight: '500',
+                                            backgroundColor: '#f7fafc',
+                                            borderRadius: '6px',
+                                            border: '1px solid #e2e8f0',
+                                            whiteSpace: 'nowrap'
+                                          }}>
+                                            <span style={{ fontSize: '16px' }}>{assigned.is_active ? '✓' : '✗'}</span>
+                                            <span>{assigned.is_active ? 'Активна' : 'Неактивна'}</span>
+                                          </div>
+                                        )}
+                                      </div>
+
+                                    {/* Другий рядок: Статус, Дата виконання, Час виконання */}
+                                    <div style={{ 
+                                      display: 'grid', 
+                                      gridTemplateColumns: '1fr 1fr 1fr',
+                                      gap: '12px',
+                                      alignItems: 'start'
+                                    }}>
+                                      {/* Статус задачі */}
+                                      <div>
+                                        <label style={{ display: 'block', fontSize: '12px', color: '#718096', marginBottom: '4px', fontWeight: '500' }}>
+                                          Статус
+                                        </label>
+                                        {isTeamLead ? (
+                                          <div style={{ display: 'flex', alignItems: 'center', minHeight: '32px' }}>
+                                            <span className={`status-badge ${assigned.task_status ? 'status-active' : 'status-inactive'}`} style={{
+                                              padding: '6px 12px',
+                                              borderRadius: '16px',
+                                              fontSize: '13px',
+                                              fontWeight: '500',
+                                              display: 'inline-block'
+                                            }}>
+                                              {assigned.task_status || (assigned.is_active ? 'Не розпочато' : '-')}
+                                            </span>
+                                          </div>
+                                        ) : (
+                                          <select
+                                            value={assigned.task_status || ''}
+                                            onChange={(e) => handleUpdateTaskStatus(assigned.id, e.target.value)}
+                                            style={{
+                                              padding: '6px 10px',
+                                              border: '2px solid #e2e8f0',
+                                              borderRadius: '6px',
+                                              fontSize: '14px',
+                                              width: '100%',
+                                              transition: 'all 0.2s'
+                                            }}
+                                            onFocus={(e) => {
+                                              e.currentTarget.style.borderColor = '#ff6b35'
+                                              e.currentTarget.style.boxShadow = '0 0 0 3px rgba(255, 107, 53, 0.1)'
+                                            }}
+                                            onBlur={(e) => {
+                                              e.currentTarget.style.borderColor = '#e2e8f0'
+                                              e.currentTarget.style.boxShadow = 'none'
+                                            }}
+                                          >
+                                            <option value="">-- Оберіть статус --</option>
+                                            <option value="В роботі">В роботі</option>
+                                            <option value="Виконано">Виконано</option>
+                                            <option value="Відкладено">Відкладено</option>
+                                            <option value="Скасовано">Скасовано</option>
+                                            <option value="Очікує">Очікує</option>
+                                          </select>
+                                        )}
+                                      </div>
+
+                                      {/* Дата виконання */}
+                                      <div>
+                                        <label style={{ display: 'block', fontSize: '12px', color: '#718096', marginBottom: '4px', fontWeight: '500' }}>
+                                          Дата виконання
+                                        </label>
+                                        {isTeamLead ? (
+                                          assigned.completion_date ? (
+                                            <div style={{
+                                              padding: '6px 10px',
+                                              border: '1px solid #e2e8f0',
+                                              borderRadius: '6px',
+                                              fontSize: '14px',
+                                              width: '100%',
+                                              backgroundColor: '#f7fafc',
+                                              color: '#2d3748',
+                                              minHeight: '32px',
+                                              display: 'flex',
+                                              alignItems: 'center'
+                                            }}>
+                                              {formatDateToUA(assigned.completion_date)}
+                                            </div>
+                                          ) : (
+                                            <div style={{
+                                              padding: '6px 10px',
+                                              fontSize: '14px',
+                                              width: '100%',
+                                              minHeight: '32px',
+                                              display: 'flex',
+                                              alignItems: 'center',
+                                              color: '#a0aec0'
+                                            }}>
+                                              -
+                                            </div>
+                                          )
+                                        ) : (
+                                          <input
+                                            type="text"
+                                            value={assigned.completion_date ? formatDateToUA(assigned.completion_date) : ''}
+                                            onChange={(e) => {
+                                              const value = e.target.value
+                                              let cleaned = value.replace(/\D/g, '')
+                                              if (cleaned.length > 8) {
+                                                cleaned = cleaned.substring(0, 8)
+                                              }
+                                              let formatted = cleaned
+                                              if (cleaned.length > 2) {
+                                                formatted = cleaned.substring(0, 2) + '.' + cleaned.substring(2)
+                                              }
+                                              if (cleaned.length > 4) {
+                                                formatted = cleaned.substring(0, 2) + '.' + cleaned.substring(2, 4) + '.' + cleaned.substring(4)
+                                              }
+                                              const isoDate = parseDateToISO(formatted)
+                                              if (isoDate || formatted === '') {
+                                                handleUpdateCompletionDate(assigned.id, formatted)
+                                              }
+                                            }}
+                                            placeholder="дд.ММ.рррр"
+                                            maxLength={10}
+                                            style={{
+                                              padding: '6px 10px',
+                                              border: '2px solid #e2e8f0',
+                                              borderRadius: '6px',
+                                              fontSize: '14px',
+                                              width: '100%',
+                                              transition: 'all 0.2s'
+                                            }}
+                                            onFocus={(e) => {
+                                              e.currentTarget.style.borderColor = '#ff6b35'
+                                              e.currentTarget.style.boxShadow = '0 0 0 3px rgba(255, 107, 53, 0.1)'
+                                            }}
+                                            onBlur={(e) => {
+                                              e.currentTarget.style.borderColor = '#e2e8f0'
+                                              e.currentTarget.style.boxShadow = 'none'
+                                            }}
+                                          />
+                                        )}
+                                      </div>
+
+                                      {/* Час виконання (хвилини) */}
+                                      <div>
+                                        <label style={{ display: 'block', fontSize: '12px', color: '#718096', marginBottom: '4px', fontWeight: '500' }}>
+                                          Час виконання
+                                        </label>
+                                        {isTeamLead ? (
+                                          <div style={{
+                                            padding: '6px 10px',
+                                            border: '1px solid #e2e8f0',
+                                            borderRadius: '6px',
+                                            fontSize: '14px',
+                                            width: '100%',
+                                            backgroundColor: '#f7fafc',
+                                            color: '#2d3748',
+                                            minHeight: '32px',
+                                            display: 'flex',
+                                            alignItems: 'center'
+                                          }}>
+                                            {(() => {
+                                              const minutes = assigned.completion_time_minutes ?? 0
+                                              const hours = Math.floor(minutes / 60)
+                                              const mins = minutes % 60
+                                              return `${hours} г. ${mins} хв.`
+                                            })()}
+                                          </div>
+                                        ) : (
+                                          <input
+                                            type="number"
+                                            value={assigned.completion_time_minutes || ''}
+                                            onChange={(e) => {
+                                              const value = e.target.value === '' ? null : parseInt(e.target.value) || 0
+                                              handleUpdateCompletionTime(assigned.id, value)
+                                            }}
+                                            placeholder="0"
+                                            min="0"
+                                            style={{
+                                              padding: '6px 10px',
+                                              border: '2px solid #e2e8f0',
+                                              borderRadius: '6px',
+                                              fontSize: '14px',
+                                              width: '100%',
+                                              transition: 'all 0.2s'
+                                            }}
+                                            onFocus={(e) => {
+                                              e.currentTarget.style.borderColor = '#ff6b35'
+                                              e.currentTarget.style.boxShadow = '0 0 0 3px rgba(255, 107, 53, 0.1)'
+                                            }}
+                                            onBlur={(e) => {
+                                              e.currentTarget.style.borderColor = '#e2e8f0'
+                                              e.currentTarget.style.boxShadow = 'none'
+                                            }}
+                                          />
+                                        )}
+                                      </div>
+                                    </div>
+                                  </div>
+                                  )
+                                })}
+                              </div>
+                            </div>
+                          )}
+                        </div>
                       )
                     })}
                   </div>
                 </div>
               )}
 
-              <div className="modal-actions">
-                <button type="button" className="btn-secondary" onClick={() => setShowViewModal(false)}>
-                  Закрити
-                </button>
+              {/* Форма додавання нової задачі */}
+              <div style={{ 
+                padding: '16px', 
+                border: '1px solid #e2e8f0', 
+                borderRadius: '8px',
+                background: '#f7fafc'
+              }}>
+                <h4 style={{ marginBottom: '16px', fontSize: '16px', fontWeight: '600', color: '#2d3748' }}>
+                  Додати задачу
+                </h4>
+                
+                {/* Вибір задачі */}
+                <div className="form-group" style={{ marginBottom: '16px' }}>
+                  <label>Оберіть задачу *</label>
+                  <select
+                    value={selectedTaskId}
+                    onChange={(e) => handleTaskSelect(Number(e.target.value))}
+                    style={{
+                      width: '100%',
+                      padding: '8px 12px',
+                      border: '1px solid #cbd5e0',
+                      borderRadius: '4px',
+                      fontSize: '16px'
+                    }}
+                  >
+                    <option value={0}>-- Оберіть задачу --</option>
+                    {getAvailableTasksForSelect().map((task) => (
+                      <option key={task.id} value={task.id}>
+                        {getBaseTaskName(task.task_name)}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Список дат з полями для виконавця та активності */}
+                {selectedTaskDates.length > 0 && (
+                  <div style={{ marginTop: '20px' }}>
+                    <label style={{ display: 'block', marginBottom: '16px', fontSize: '14px', fontWeight: '600', color: '#2d3748' }}>
+                      Планові дати для кожного місяця:
+                    </label>
+                    <div className="months-grid">
+                      {selectedTaskDates.map((dateItem, index) => (
+                        <div key={index} className="month-input-wrapper">
+                          <label className="month-label">
+                            {getMonthName(dateItem.month)}
+                          </label>
+                          <input
+                            type="text"
+                            value={formatDateToUA(dateItem.date)}
+                            onChange={(e) => {
+                              if (isTeamLead) return // Тім лід не може редагувати дати
+                              
+                              const value = e.target.value
+                              // Видаляємо всі символи крім цифр
+                              let cleaned = value.replace(/\D/g, '')
+                              
+                              // Обмежуємо довжину до 8 цифр (ддММрррр)
+                              if (cleaned.length > 8) {
+                                cleaned = cleaned.substring(0, 8)
+                              }
+                              
+                              // Форматуємо як дд.ММ.рррр
+                              let formatted = cleaned
+                              if (cleaned.length > 2) {
+                                formatted = cleaned.substring(0, 2) + '.' + cleaned.substring(2)
+                              }
+                              if (cleaned.length > 4) {
+                                formatted = cleaned.substring(0, 2) + '.' + cleaned.substring(2, 4) + '.' + cleaned.substring(4)
+                              }
+                              
+                              // Оновлюємо дату
+                              const isoDate = parseDateToISO(formatted)
+                              if (isoDate) {
+                                const updated = [...selectedTaskDates]
+                                updated[index].date = isoDate
+                                // Оновлюємо місяць якщо дата змінилася
+                                const newDate = new Date(isoDate)
+                                updated[index].month = newDate.getMonth() + 1
+                                setSelectedTaskDates(updated)
+                              }
+                            }}
+                            readOnly={isTeamLead}
+                            placeholder="дд.ММ.рррр"
+                            maxLength={10}
+                            className="month-date-input"
+                            required
+                            style={isTeamLead ? {
+                              backgroundColor: '#f7fafc',
+                              cursor: 'not-allowed',
+                              color: '#718096'
+                            } : undefined}
+                          />
+                          <select
+                            value={dateItem.executorId}
+                            onChange={(e) => {
+                              const updated = [...selectedTaskDates]
+                              updated[index].executorId = Number(e.target.value)
+                              setSelectedTaskDates(updated)
+                            }}
+                            style={{
+                              padding: '8px 10px',
+                              border: '2px solid #e2e8f0',
+                              borderRadius: '8px',
+                              fontSize: '14px',
+                              width: '100%',
+                              marginTop: '8px',
+                              transition: 'all 0.2s'
+                            }}
+                            onFocus={(e) => {
+                              e.currentTarget.style.borderColor = '#ff6b35'
+                              e.currentTarget.style.boxShadow = '0 0 0 3px rgba(255, 107, 53, 0.1)'
+                            }}
+                            onBlur={(e) => {
+                              e.currentTarget.style.borderColor = '#e2e8f0'
+                              e.currentTarget.style.boxShadow = 'none'
+                            }}
+                          >
+                            <option value={0}>-- Оберіть виконавця --</option>
+                            {availableExecutors.map((executor) => {
+                              const fullName = [executor.surname, executor.name, executor.middle_name].filter(Boolean).join(' ') || executor.email
+                              return (
+                                <option key={executor.id} value={executor.id}>
+                                  {fullName}
+                                </option>
+                              )
+                            })}
+                          </select>
+                          <label style={{ 
+                            display: 'flex', 
+                            alignItems: 'center', 
+                            gap: '8px', 
+                            cursor: 'pointer',
+                            marginTop: '8px',
+                            padding: '8px 0'
+                          }}>
+                            <input
+                              type="checkbox"
+                              checked={dateItem.isActive}
+                              onChange={(e) => {
+                                const updated = [...selectedTaskDates]
+                                updated[index].isActive = e.target.checked
+                                setSelectedTaskDates(updated)
+                              }}
+                              style={{ width: '18px', height: '18px', cursor: 'pointer' }}
+                            />
+                            <span style={{ fontSize: '14px', color: '#4a5568', fontWeight: '500' }}>Активна</span>
+                          </label>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                <div style={{ marginTop: '20px', display: 'flex', justifyContent: 'flex-end' }}>
+                  <button
+                    type="button"
+                    className="btn-primary"
+                    onClick={handleAddAssignedTasks}
+                    disabled={selectedTaskId === 0 || selectedTaskDates.length === 0}
+                  >
+                    Додати
+                  </button>
+                </div>
               </div>
             </div>
           </div>

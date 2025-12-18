@@ -3,6 +3,8 @@ import { useNavigate } from 'react-router-dom'
 import { getAllProjects, createProject, updateProjectStatus } from '../lib/users'
 import { supabase } from '../lib/supabase'
 import type { Project, User } from '../types/database'
+import { formatDate } from '../utils/date'
+import { getFullName } from '../utils/user'
 import './AdminPages.css'
 
 type ProjectWithUser = Project & { user?: User }
@@ -157,19 +159,9 @@ export default function ProjectsPage() {
     }
   }
 
-  const formatDate = (dateString: string) => {
-    const date = new Date(dateString)
-    return date.toLocaleDateString('uk-UA', {
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-    })
-  }
-
-  const getFullName = (project: ProjectWithUser) => {
+  const getProjectFullName = (project: ProjectWithUser) => {
     if (project.user) {
-      const parts = [project.user.surname, project.user.name, project.user.middle_name].filter(Boolean)
-      return parts.join(' ') || '-'
+      return getFullName(project.user)
     }
     return '-'
   }
@@ -266,7 +258,7 @@ export default function ProjectsPage() {
                       {project.status || 'Не вказано'}
                     </span>
                   </td>
-                  <td>{getFullName(project)}</td>
+                  <td>{getProjectFullName(project)}</td>
                   <td>{project.user?.phone || project.phone || '-'}</td>
                   <td>{project.company_name || '-'}</td>
                   <td>

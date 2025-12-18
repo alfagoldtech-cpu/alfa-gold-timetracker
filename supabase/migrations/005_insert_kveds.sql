@@ -63,3 +63,5 @@ INSERT INTO kveds (code, description) VALUES
 ('10.39', 'Інші види перероблення та консервування фруктів і овочів')
 ON CONFLICT (code) DO NOTHING;
 
+
+
