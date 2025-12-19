@@ -5,3 +5,6 @@ DROP INDEX IF EXISTS idx_tasks_status;
 -- Видаляємо колонку status
 ALTER TABLE tasks DROP COLUMN IF EXISTS status;
 
+
+
+

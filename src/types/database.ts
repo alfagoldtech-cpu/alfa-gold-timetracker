@@ -128,9 +128,22 @@ export interface Task {
   project_id: number
   task_name: string
   task_type?: string
+  recurrence_type?: string
   category_id?: number
   planned_date: string
   description?: string
+  created_at: string
+  updated_at: string
+}
+
+export interface TaskTimeLog {
+  id: number
+  assigned_task_id: number
+  user_id: number
+  start_time: string
+  end_time?: string | null
+  log_status: 'in_progress' | 'paused' | 'completed'
+  duration_minutes?: number | null
   created_at: string
   updated_at: string
 }
@@ -192,6 +205,11 @@ export interface Database {
         Row: GroupCompany
         Insert: Omit<GroupCompany, 'id' | 'created_at' | 'updated_at'>
         Update: Partial<Omit<GroupCompany, 'id' | 'created_at' | 'updated_at'>>
+      }
+      task_time_logs: {
+        Row: TaskTimeLog
+        Insert: Omit<TaskTimeLog, 'id' | 'created_at' | 'updated_at'>
+        Update: Partial<Omit<TaskTimeLog, 'id' | 'created_at' | 'updated_at'>>
       }
     }
   }

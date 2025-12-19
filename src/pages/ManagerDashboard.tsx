@@ -6,6 +6,7 @@ import EmployeesPage from './EmployeesPage'
 import ClientsPage from './ClientsPage'
 import CalendarPage from './CalendarPage'
 import TaskCalendarPage from './TaskCalendarPage'
+import MyCalendarPage from './MyCalendarPage'
 import './ManagerDashboard.css'
 import './AdminDashboard.css'
 
@@ -16,22 +17,22 @@ export default function ManagerDashboard() {
   const [isTeamLead, setIsTeamLead] = useState(false)
   
   // Отримуємо активний таб з URL або sessionStorage
-  const getInitialTab = (): 'employees' | 'clients' | 'calendar' | 'task-calendar' => {
-    const tabFromUrl = searchParams.get('tab') as 'employees' | 'clients' | 'calendar' | 'task-calendar' | null
-    if (tabFromUrl && ['employees', 'clients', 'calendar', 'task-calendar'].includes(tabFromUrl)) {
+  const getInitialTab = (): 'employees' | 'clients' | 'calendar' | 'task-calendar' | 'my-calendar' => {
+    const tabFromUrl = searchParams.get('tab') as 'employees' | 'clients' | 'calendar' | 'task-calendar' | 'my-calendar' | null
+    if (tabFromUrl && ['employees', 'clients', 'calendar', 'task-calendar', 'my-calendar'].includes(tabFromUrl)) {
       return tabFromUrl
     }
-    const tabFromStorage = sessionStorage.getItem('managerDashboardTab') as 'employees' | 'clients' | 'calendar' | 'task-calendar' | null
-    if (tabFromStorage && ['employees', 'clients', 'calendar', 'task-calendar'].includes(tabFromStorage)) {
+    const tabFromStorage = sessionStorage.getItem('managerDashboardTab') as 'employees' | 'clients' | 'calendar' | 'task-calendar' | 'my-calendar' | null
+    if (tabFromStorage && ['employees', 'clients', 'calendar', 'task-calendar', 'my-calendar'].includes(tabFromStorage)) {
       return tabFromStorage
     }
     return 'employees'
   }
   
-  const [activeTab, setActiveTab] = useState<'employees' | 'clients' | 'calendar' | 'task-calendar'>(getInitialTab)
+  const [activeTab, setActiveTab] = useState<'employees' | 'clients' | 'calendar' | 'task-calendar' | 'my-calendar'>(getInitialTab)
   
   // Оновлюємо URL та sessionStorage при зміні таба
-  const handleTabChange = (tab: 'employees' | 'clients' | 'calendar' | 'task-calendar') => {
+  const handleTabChange = (tab: 'employees' | 'clients' | 'calendar' | 'task-calendar' | 'my-calendar') => {
     setActiveTab(tab)
     setSearchParams({ tab })
     sessionStorage.setItem('managerDashboardTab', tab)
@@ -39,8 +40,8 @@ export default function ManagerDashboard() {
 
   // Відновлюємо таб з URL при завантаженні сторінки
   useEffect(() => {
-    const tabFromUrl = searchParams.get('tab') as 'employees' | 'clients' | 'calendar' | 'task-calendar' | null
-    if (tabFromUrl && ['employees', 'clients', 'calendar', 'task-calendar'].includes(tabFromUrl)) {
+    const tabFromUrl = searchParams.get('tab') as 'employees' | 'clients' | 'calendar' | 'task-calendar' | 'my-calendar' | null
+    if (tabFromUrl && ['employees', 'clients', 'calendar', 'task-calendar', 'my-calendar'].includes(tabFromUrl)) {
       setActiveTab(tabFromUrl)
       sessionStorage.setItem('managerDashboardTab', tabFromUrl)
     }
@@ -209,6 +210,22 @@ export default function ManagerDashboard() {
                   </button>
                 </>
               )}
+              <button
+                className={`sidebar-nav-item ${activeTab === 'my-calendar' ? 'active' : ''}`}
+                onClick={() => {
+                  handleTabChange('my-calendar')
+                  setSidebarOpen(false)
+                }}
+              >
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect>
+                  <line x1="16" y1="2" x2="16" y2="6"></line>
+                  <line x1="8" y1="2" x2="8" y2="6"></line>
+                  <line x1="3" y1="10" x2="21" y2="10"></line>
+                  <path d="M8 14h.01M12 14h.01M16 14h.01M8 18h.01M12 18h.01M16 18h.01"></path>
+                </svg>
+                <span>Мій календар</span>
+              </button>
             </nav>
           </div>
         </>
@@ -220,6 +237,7 @@ export default function ManagerDashboard() {
           {activeTab === 'clients' && <ClientsPage />}
           {activeTab === 'calendar' && <CalendarPage />}
           {activeTab === 'task-calendar' && isTeamLead && <TaskCalendarPage />}
+          {activeTab === 'my-calendar' && <MyCalendarPage />}
         </div>
       </div>
     </div>

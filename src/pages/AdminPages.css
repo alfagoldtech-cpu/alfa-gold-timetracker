@@ -136,6 +136,11 @@
 }
 
 .status-inactive {
+  background: #e2e8f0;
+  color: #718096;
+}
+
+.status-overdue {
   background: #fed7d7;
   color: #c53030;
 }

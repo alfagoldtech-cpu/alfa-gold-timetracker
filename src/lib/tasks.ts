@@ -17,6 +17,7 @@ export async function getTasksByProject(projectId: number): Promise<Task[]> {
 }
 
 export async function createTask(taskData: Omit<Task, 'id' | 'created_at' | 'updated_at'>): Promise<Task | null> {
+  console.log('createTask called with:', taskData)
   const { data, error } = await supabase
     .from('tasks')
     .insert(taskData)
@@ -25,9 +26,12 @@ export async function createTask(taskData: Omit<Task, 'id' | 'created_at' | 'upd
 
   if (error) {
     console.error('Error creating task:', error)
+    console.error('Error details:', JSON.stringify(error, null, 2))
+    console.error('Task data that failed:', JSON.stringify(taskData, null, 2))
     return null
   }
 
+  console.log('Task created successfully:', data)
   return data
 }
 

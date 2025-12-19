@@ -31,13 +31,29 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           console.warn('Користувач не знайдений в таблиці users. Створіть запис для auth_user_id:', authUserId)
         } else {
           console.error('Error loading user:', error)
+          // Логуємо детальну інформацію про помилку мережі
+          if (error.message?.includes('Failed to fetch') || error.code === -102 || error.message?.includes('network')) {
+            console.error('❌ Помилка підключення до Supabase при завантаженні користувача:', {
+              message: error.message,
+              code: error.code,
+              hint: 'Перевірте підключення до інтернету та налаштування Supabase URL'
+            })
+          }
         }
         setUser(null)
       } else {
         setUser(data)
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error('Error in loadUser:', err)
+      // Логуємо детальну інформацію про помилку мережі
+      if (err?.message?.includes('Failed to fetch') || err?.code === -102 || err?.message?.includes('network')) {
+        console.error('❌ Помилка підключення до Supabase при завантаженні користувача:', {
+          message: err?.message,
+          code: err?.code,
+          hint: 'Перевірте підключення до інтернету та налаштування Supabase URL'
+        })
+      }
       setUser(null)
     } finally {
       setLoading(false)
@@ -74,6 +90,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         
         if (error) {
           console.error('Error getting session:', error)
+          // Логуємо детальну інформацію про помилку мережі
+          if (error.message?.includes('Failed to fetch') || error.code === -102 || error.message?.includes('network')) {
+            console.error('❌ Помилка підключення до Supabase:', {
+              message: error.message,
+              code: error.code,
+              hint: 'Перевірте підключення до інтернету та налаштування Supabase URL'
+            })
+          }
           setLoading(false)
           return
         }
@@ -87,6 +111,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       })
       .catch((err) => {
         console.error('Error in getSession:', err)
+        // Логуємо детальну інформацію про помилку мережі
+        if (err.message?.includes('Failed to fetch') || err.code === -102 || err.message?.includes('network')) {
+          console.error('❌ Помилка підключення до Supabase:', {
+            message: err.message,
+            code: err.code,
+            hint: 'Перевірте підключення до інтернету та налаштування Supabase URL'
+          })
+        }
         if (mounted) {
           setLoading(false)
         }

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo } from 'react'
+import React, { useState, useEffect, useRef, useMemo } from 'react'
 import { useAuth } from '../contexts/AuthContext'
 import { useNavigate } from 'react-router-dom'
 import { 
@@ -14,16 +14,21 @@ import { searchGroupCompanies, createGroupCompany, getGroupCompaniesByProject, u
 import { 
   getActiveAssignedTasksCountForClients,
   getAssignedTasksByClient,
+  getAssignedTasksByClientAndGroup,
   createMultipleAssignedTasks,
+  createAssignedTask,
   updateAssignedTask,
   type AssignedTaskWithDetails
 } from '../lib/assignedTasks'
-import { getTasksByProject } from '../lib/tasks'
-import { getUsersByProject } from '../lib/users'
+import { getTasksByProject, createTask, updateTask } from '../lib/tasks'
+import { getUsersByProject, getTeamLeadGroupMembers } from '../lib/users'
+import { getTaskCategoriesByProject } from '../lib/tasksCategory'
+import { getTaskTimeStats } from '../lib/taskTimeLogs'
+import type { TaskCategory } from '../types/database'
 import { supabase } from '../lib/supabase'
 import type { Client, Kved, Department, GroupCompany, Task, User } from '../types/database'
-import { formatDate, formatCurrency, formatDateToUA, parseDateToISO } from '../utils/date'
-import { getStatusBadgeClass, getStatusText } from '../utils/status'
+import { formatDate, formatCurrency, formatDateToUA, parseDateToISO, formatMinutesToHoursMinutes } from '../utils/date'
+import { getStatusBadgeClass, getStatusText, getTaskStatus, getTaskTypeText } from '../utils/status'
 
 interface ClientWithDepartments extends Client {
   departments?: Department[]
@@ -59,11 +64,421 @@ export default function ClientsPage() {
   const [error, setError] = useState<string | null>(null)
   const [success, setSuccess] = useState<string | null>(null)
   const [expandedClientGroups, setExpandedClientGroups] = useState<Set<number | 'no-group'>>(new Set())
+  const [expandedClientsWithTasks, setExpandedClientsWithTasks] = useState<Set<number>>(new Set())
+  const [clientTasks, setClientTasks] = useState<Map<number, AssignedTaskWithDetails[]>>(new Map())
+  const [clientTasksLoading, setClientTasksLoading] = useState<Set<number>>(new Set())
+  const [clientTasksPeriod, setClientTasksPeriod] = useState<Map<number, { type: 'week' | 'month', startDate: Date }>>(new Map())
+  const [clientTasksPage, setClientTasksPage] = useState<Map<number, number>>(new Map())
+  const [clientTaskTimeStats, setClientTaskTimeStats] = useState<Map<number, { totalMinutes: number; status: string | null; completionDate: string | null }>>(new Map())
+  
+  // Створення індивідуальної задачі для клієнта
+  const [showCreateTaskModal, setShowCreateTaskModal] = useState(false)
+  const [selectedClientForCreateTask, setSelectedClientForCreateTask] = useState<number | null>(null)
+  const [taskCategories, setTaskCategories] = useState<TaskCategory[]>([])
+  const [availableExecutorsForCreate, setAvailableExecutorsForCreate] = useState<User[]>([])
+  const [newTaskForm, setNewTaskForm] = useState({
+    executor_id: null as number | null,
+    planned_date: '',
+    task_name: '',
+    category_id: null as number | null,
+    description: ''
+  })
+
+  // Редагування задачі клієнта
+  const [editingClientTaskId, setEditingClientTaskId] = useState<number | null>(null)
+
+  // Допоміжні функції для роботи з датами
+  const getCurrentWeekMonday = (): Date => {
+    const today = new Date()
+    const dayOfWeek = today.getDay()
+    const diff = today.getDate() - dayOfWeek + (dayOfWeek === 0 ? -6 : 1)
+    const monday = new Date(today)
+    monday.setDate(today.getDate() + (dayOfWeek === 0 ? -6 : 1) - dayOfWeek)
+    monday.setHours(0, 0, 0, 0)
+    return monday
+  }
+
+  const getWeekDates = (startDate: Date): Date[] => {
+    const dates: Date[] = []
+    for (let i = 0; i < 7; i++) {
+      const date = new Date(startDate)
+      date.setDate(startDate.getDate() + i)
+      dates.push(date)
+    }
+    return dates
+  }
+
+  const addDays = (date: Date, days: number): Date => {
+    const result = new Date(date)
+    result.setDate(result.getDate() + days)
+    return result
+  }
+
+  const addMonths = (date: Date, months: number): Date => {
+    const result = new Date(date)
+    result.setMonth(result.getMonth() + months)
+    return result
+  }
+
+  const getAllDatesInMonth = (date: Date): Date[] => {
+    const year = date.getFullYear()
+    const month = date.getMonth()
+    const firstDay = new Date(year, month, 1)
+    const lastDay = new Date(year, month + 1, 0)
+    const dates: Date[] = []
+    for (let d = new Date(firstDay); d <= lastDay; d.setDate(d.getDate() + 1)) {
+      dates.push(new Date(d))
+    }
+    return dates
+  }
+
+  // Функція для завантаження задач клієнта
+  const loadClientTasks = async (clientId: number) => {
+    const period = clientTasksPeriod.get(clientId) || { type: 'week' as const, startDate: getCurrentWeekMonday() }
+    await loadClientTasksWithPeriod(clientId, period)
+  }
+
+  // Функція для перемикання розгорнутого стану клієнта з задачами
+  const toggleClientTasks = async (clientId: number) => {
+    const isExpanded = expandedClientsWithTasks.has(clientId)
+    
+    if (isExpanded) {
+      setExpandedClientsWithTasks(prev => {
+        const newSet = new Set(prev)
+        newSet.delete(clientId)
+        return newSet
+      })
+    } else {
+      setExpandedClientsWithTasks(prev => new Set(prev).add(clientId))
+      // Встановлюємо початковий період (цей тиждень)
+      const initialPeriod = { type: 'week' as const, startDate: getCurrentWeekMonday() }
+      if (!clientTasksPeriod.has(clientId)) {
+        setClientTasksPeriod(prev => {
+          const newMap = new Map(prev)
+          newMap.set(clientId, initialPeriod)
+          return newMap
+        })
+      }
+      // Завантажуємо задачі з початковим періодом
+      loadClientTasksWithPeriod(clientId, clientTasksPeriod.get(clientId) || initialPeriod)
+    }
+  }
+
+  // Допоміжна функція для завантаження задач з явним періодом
+  const loadClientTasksWithPeriod = async (clientId: number, period: { type: 'week' | 'month', startDate: Date }) => {
+    if (!user?.id) {
+      console.error('User ID not found')
+      return
+    }
+
+    console.log('Loading tasks for client:', clientId, 'team lead group id:', user.id, 'period:', period)
+    setClientTasksLoading(prev => new Set(prev).add(clientId))
+
+    try {
+      const tasks = await getAssignedTasksByClientAndGroup(clientId, user.id)
+      console.log('Loaded tasks for client:', clientId, 'count:', tasks.length)
+      
+      // Фільтруємо задачі за періодом (тиждень або місяць)
+      let filteredTasks = tasks
+
+      if (period.type === 'week') {
+        const weekDates = getWeekDates(period.startDate)
+        const weekDateStrings = weekDates.map(d => d.toISOString().split('T')[0])
+        console.log('Filtering by week:', weekDateStrings)
+        filteredTasks = tasks.filter(task => {
+          const taskDate = task.task?.planned_date
+          if (!taskDate) return false
+          const taskDateStr = taskDate.split('T')[0]
+          return weekDateStrings.includes(taskDateStr)
+        })
+        console.log('Filtered tasks count:', filteredTasks.length)
+      } else {
+        const monthDates = getAllDatesInMonth(period.startDate)
+        const monthDateStrings = monthDates.map(d => d.toISOString().split('T')[0])
+        console.log('Filtering by month:', monthDateStrings.length, 'dates')
+        filteredTasks = tasks.filter(task => {
+          const taskDate = task.task?.planned_date
+          if (!taskDate) return false
+          const taskDateStr = taskDate.split('T')[0]
+          return monthDateStrings.includes(taskDateStr)
+        })
+        console.log('Filtered tasks count:', filteredTasks.length)
+      }
+
+      // Сортуємо по датах від меншої до більшої
+      filteredTasks.sort((a, b) => {
+        const dateA = a.task?.planned_date || ''
+        const dateB = b.task?.planned_date || ''
+        return dateA.localeCompare(dateB)
+      })
+
+      console.log('Setting tasks for client:', clientId, 'filtered count:', filteredTasks.length)
+      setClientTasks(prev => {
+        const newMap = new Map(prev)
+        newMap.set(clientId, filteredTasks)
+        return newMap
+      })
+
+      // Завантажуємо статистику часу для всіх задач клієнта
+      const statsPromises = filteredTasks.map(async (task) => {
+        try {
+          const stats = await getTaskTimeStats(task.id)
+          return { taskId: task.id, stats }
+        } catch (err) {
+          console.error(`Error loading stats for task ${task.id}:`, err)
+          return null
+        }
+      })
+      
+      const statsResults = await Promise.all(statsPromises)
+      setClientTaskTimeStats(prev => {
+        const newMap = new Map(prev)
+        statsResults.forEach(result => {
+          if (result) {
+            newMap.set(result.taskId, {
+              totalMinutes: result.stats.totalMinutes,
+              status: result.stats.status,
+              completionDate: result.stats.completionDate
+            })
+          }
+        })
+        return newMap
+      })
+    } catch (err) {
+      console.error('Error loading client tasks:', err)
+    } finally {
+      setClientTasksLoading(prev => {
+        const newSet = new Set(prev)
+        newSet.delete(clientId)
+        return newSet
+      })
+    }
+  }
+
+  // Функція для створення індивідуальної задачі для клієнта
+  const handleCreateIndividualTask = async () => {
+    if (!user?.project_id || !user?.id || !selectedClientForCreateTask) {
+      setError('Користувач або клієнт не знайдено')
+      return
+    }
+
+    if (!newTaskForm.executor_id || !newTaskForm.planned_date || !newTaskForm.task_name) {
+      setError('Заповніть всі обов\'язкові поля: Виконавець, Дата виконання, Назва задачі')
+      return
+    }
+
+    setError(null)
+
+    try {
+      // Визначаємо group_id
+      const role = await getRoleById(user.role_id!)
+      const isTeamLeadRole = role?.role_name === 'Тім лід'
+      const groupId = isTeamLeadRole ? user.id : (user.group_id || null)
+      
+      // Створюємо задачу
+      const task = await createTask({
+        project_id: user.project_id,
+        task_name: newTaskForm.task_name,
+        task_type: 'Індивідуальна задача',
+        recurrence_type: 'single',
+        category_id: newTaskForm.category_id || undefined,
+        planned_date: newTaskForm.planned_date,
+        description: newTaskForm.description || undefined
+      })
+
+      if (!task) {
+        setError('Не вдалося створити задачу')
+        return
+      }
+
+      // Створюємо призначену задачу
+      const assignedTask = await createAssignedTask({
+        task_id: task.id,
+        client_id: selectedClientForCreateTask,
+        department_id: null,
+        group_id: groupId,
+        executor_id: newTaskForm.executor_id,
+        is_active: true
+      })
+
+      if (!assignedTask) {
+        setError('Не вдалося призначити задачу')
+        return
+      }
+
+      // Оновлюємо список задач клієнта
+      await loadClientTasksWithPeriod(selectedClientForCreateTask, clientTasksPeriod.get(selectedClientForCreateTask) || { type: 'week' as const, startDate: getCurrentWeekMonday() })
+
+      // Закриваємо модальне вікно та очищаємо форму
+      setShowCreateTaskModal(false)
+      setSelectedClientForCreateTask(null)
+      setNewTaskForm({
+        executor_id: null,
+        planned_date: '',
+        task_name: '',
+        category_id: null,
+        description: ''
+      })
+      setSuccess('Задачу успішно створено')
+    } catch (err: any) {
+      console.error('Error creating individual task:', err)
+      setError(err.message || 'Помилка створення задачі')
+    }
+  }
+
+  // Функція для оновлення виконавця задачі клієнта
+  const handleUpdateClientTaskExecutor = async (taskId: number, executorId: number | null, clientId: number) => {
+    const tasks = clientTasks.get(clientId) || []
+    const task = tasks.find(t => t.id === taskId)
+    if (!task) return
+
+    const originalExecutorId = task.executor_id
+    let executorGroupId: number | null = null
+
+    if (executorId) {
+      const executor = availableExecutorsForCreate.find(e => e.id === executorId)
+      if (executor) {
+        executorGroupId = executor.group_id || null
+      }
+    }
+
+    // Оптимістичне оновлення
+    setClientTasks(prev => {
+      const newMap = new Map(prev)
+      const clientTasksList = newMap.get(clientId) || []
+      newMap.set(clientId, clientTasksList.map(t => {
+        if (t.id === taskId) {
+          const newExecutor = executorId 
+            ? availableExecutorsForCreate.find(e => e.id === executorId) || undefined
+            : undefined
+          
+          return {
+            ...t,
+            executor_id: executorId,
+            group_id: executorGroupId,
+            executor: newExecutor
+          }
+        }
+        return t
+      }))
+      return newMap
+    })
+
+    // Оновлюємо в БД
+    const updateData: { executor_id: number | null; group_id?: number | null } = { 
+      executor_id: executorId,
+      group_id: executorGroupId
+    }
+    
+    const success = await updateAssignedTask(taskId, updateData)
+    
+    if (!success) {
+      // Відкат змін при помилці
+      setClientTasks(prev => {
+        const newMap = new Map(prev)
+        const clientTasksList = newMap.get(clientId) || []
+        newMap.set(clientId, clientTasksList.map(t => {
+          if (t.id === taskId) {
+            return { 
+              ...t, 
+              executor_id: originalExecutorId,
+              executor: task.executor
+            }
+          }
+          return t
+        }))
+        return newMap
+      })
+      setError('Не вдалося оновити виконавця')
+    } else {
+      // Оновлюємо статистику для цієї задачі
+      try {
+        await new Promise(resolve => setTimeout(resolve, 300))
+        const stats = await getTaskTimeStats(taskId)
+        setClientTaskTimeStats(prev => {
+          const newMap = new Map(prev)
+          newMap.set(taskId, {
+            totalMinutes: stats.totalMinutes,
+            status: stats.status,
+            completionDate: stats.completionDate
+          })
+          return newMap
+        })
+      } catch (err) {
+        console.error('Error updating task stats:', err)
+      }
+    }
+  }
+
+  // Функція для деактивації/активації задачі клієнта
+  const handleToggleClientTaskActive = async (taskId: number, clientId: number) => {
+    const tasks = clientTasks.get(clientId) || []
+    const task = tasks.find(t => t.id === taskId)
+    if (!task) return
+
+    const currentStatus = task.is_active
+    const newStatus = !currentStatus
+
+    // Оптимістичне оновлення
+      setClientTasks(prev => {
+        const newMap = new Map(prev)
+        const clientTasksList = newMap.get(clientId) || []
+        newMap.set(clientId, clientTasksList.map(t => {
+          if (t.id === taskId) {
+            return { ...t, is_active: newStatus }
+          }
+          return t
+        }))
+        return newMap
+      })
+
+    // Оновлюємо в БД
+    const success = await updateAssignedTask(taskId, { is_active: newStatus })
+    
+    if (success) {
+      // Оновлюємо статистику для цієї задачі
+      try {
+        await new Promise(resolve => setTimeout(resolve, 300))
+        const stats = await getTaskTimeStats(taskId)
+        setClientTaskTimeStats(prev => {
+          const newMap = new Map(prev)
+          newMap.set(taskId, {
+            totalMinutes: stats.totalMinutes,
+            status: stats.status,
+            completionDate: stats.completionDate
+          })
+          return newMap
+        })
+      } catch (err) {
+        console.error('Error updating task stats:', err)
+      }
+    } else {
+      // Відкат змін при помилці
+      setClientTasks(prev => {
+        const newMap = new Map(prev)
+        const clientTasksList = newMap.get(clientId) || []
+        newMap.set(clientId, clientTasksList.map(t => {
+          if (t.id === taskId) {
+            return { ...t, is_active: currentStatus }
+          }
+          return t
+        }))
+        return newMap
+      })
+      setError('Не вдалося змінити статус задачі')
+    }
+    
+    // Якщо задача деактивована, закриваємо модальне вікно
+    if (!newStatus) {
+      setEditingClientTaskId(null)
+    }
+  }
   
   // Стани для модального вікна призначення задач
   const [showAssignTasksModal, setShowAssignTasksModal] = useState(false)
   const [selectedClientForTasks, setSelectedClientForTasks] = useState<ClientWithDepartments | null>(null)
   const [assignedTasks, setAssignedTasks] = useState<AssignedTaskWithDetails[]>([])
+  const [allAssignedTasksForClient, setAllAssignedTasksForClient] = useState<AssignedTaskWithDetails[]>([]) // Всі призначені задачі для клієнта (для фільтрації)
   const [availableTasks, setAvailableTasks] = useState<Task[]>([])
   const [availableExecutors, setAvailableExecutors] = useState<User[]>([])
   const [selectedTaskId, setSelectedTaskId] = useState<number>(0)
@@ -96,6 +511,43 @@ export default function ClientsPage() {
     bank_name: '',
     department_ids: [] as number[]
   })
+
+  // Завантажуємо категорії задач
+  useEffect(() => {
+    const loadCategories = async () => {
+      if (!user?.project_id) return
+      try {
+        const categories = await getTaskCategoriesByProject(user.project_id)
+        setTaskCategories(categories)
+      } catch (err) {
+        console.error('Error loading task categories:', err)
+      }
+    }
+    loadCategories()
+  }, [user?.project_id])
+
+  // Завантажуємо виконавців для створення задач
+  useEffect(() => {
+    const loadExecutors = async () => {
+      if (!user?.project_id || !user?.id || !user?.role_id) return
+      try {
+        const role = await getRoleById(user.role_id)
+        const isTeamLeadRole = role?.role_name === 'Тім лід'
+        
+        let executors: User[] = []
+        if (isTeamLeadRole) {
+          executors = await getTeamLeadGroupMembers(user.id)
+        } else {
+          const allExecutors = await getUsersByProject(user.project_id)
+          executors = allExecutors.filter(u => u.role_id !== 1 && u.role_id !== 2)
+        }
+        setAvailableExecutorsForCreate(executors)
+      } catch (err) {
+        console.error('Error loading executors:', err)
+      }
+    }
+    loadExecutors()
+  }, [user?.project_id, user?.id, user?.role_id])
 
   useEffect(() => {
     if (user?.project_id && user?.role_id) {
@@ -664,8 +1116,14 @@ export default function ClientsPage() {
     setSuccess(null)
     
     try {
-      // Завантажуємо призначені задачі для клієнта
-      const assigned = await getAssignedTasksByClient(client.id)
+      // Завантажуємо ВСІ призначені задачі для клієнта (для фільтрації)
+      const allAssigned = await getAssignedTasksByClient(client.id)
+      setAllAssignedTasksForClient(allAssigned)
+      
+      // Завантажуємо призначені задачі для відображення (фільтровані по group_id для тім ліда)
+      const assigned = isTeamLead && user?.id
+        ? await getAssignedTasksByClientAndGroup(client.id, user.id)
+        : allAssigned
       setAssignedTasks(assigned)
       
       // Завантажуємо доступні задачі та виконавців
@@ -729,15 +1187,18 @@ export default function ClientsPage() {
 
   // Функція для отримання доступних задач для вибору
   const getAvailableTasksForSelect = (): Task[] => {
-    if (!assignedTasks || !availableTasks || availableTasks.length === 0) {
+    if (!availableTasks || availableTasks.length === 0) {
       return []
     }
     
     try {
       // Отримуємо ID задач, які вже призначені цьому клієнту
-      const assignedTaskIds = new Set(assignedTasks.map(at => at.task_id))
+      // Важливо: використовуємо allAssignedTasksForClient для фільтрації,
+      // щоб перевірити ВСІ призначені задачі для клієнта, незалежно від group_id
+      // Це запобігає дублюванню призначень
+      const assignedTaskIds = new Set((allAssignedTasksForClient.length > 0 ? allAssignedTasksForClient : assignedTasks).map(at => at.task_id))
       
-      // Фільтруємо задачі, які ще не призначені
+      // Фільтруємо задачі, які ще не призначені цьому клієнту
       const unassignedTasks = availableTasks.filter(task => !assignedTaskIds.has(task.id))
       
       // Групуємо за базовою назвою та повертаємо унікальні групи
@@ -873,10 +1334,16 @@ export default function ClientsPage() {
           // Використовуємо строгу перевірку === для уникнення плутанини
           if (task.id === taskId) {
             console.log('Оновлюємо задачу в стані:', task.id, '->', finalExecutorId)
+            // Оновлюємо також об'єкт executor, якщо виконавець обрано
+            const newExecutor = finalExecutorId 
+              ? availableExecutors.find(e => e.id === finalExecutorId) || undefined
+              : undefined
+            
             return { 
               ...task, 
               executor_id: finalExecutorId,
-              group_id: executorGroupId
+              group_id: executorGroupId,
+              executor: newExecutor
             }
           }
           return task
@@ -1117,28 +1584,85 @@ export default function ClientsPage() {
         return tBaseName === baseName
       })
 
+      console.log('handleAddAssignedTasks - selectedTask:', selectedTask)
+      console.log('handleAddAssignedTasks - relatedTasks:', relatedTasks)
+      console.log('handleAddAssignedTasks - selectedTaskDates:', selectedTaskDates)
+      console.log('handleAddAssignedTasks - isTeamLead:', isTeamLead, 'user?.id:', user?.id, 'user?.group_id:', user?.group_id)
+
+      // Перевіряємо, чи є вже призначені задачі для цього клієнта
+      // Використовуємо allAssignedTasksForClient для перевірки, щоб уникнути дублювання
+      const existingTaskIds = new Set((allAssignedTasksForClient.length > 0 ? allAssignedTasksForClient : await getAssignedTasksByClient(selectedClientForTasks.id)).map(t => t.task_id))
+
       // Створюємо призначені задачі для кожної дати з відповідною task_id
-      const tasksToCreate = selectedTaskDates.map((dateItem) => {
-        const relatedTask = relatedTasks.find(t => t.planned_date.split('T')[0] === dateItem.date)
-        // Для тім ліда group_id = user.id (ID тім ліда)
-        // Для інших ролей group_id = user.group_id (якщо є)
-        const groupId = isTeamLead ? user?.id : (user?.group_id || null)
-        return {
-          task_id: relatedTask?.id || selectedTaskId,
-          client_id: selectedClientForTasks.id,
-          department_id: selectedClientForTasks.departments?.[0]?.id || null,
-          group_id: groupId,
-          executor_id: dateItem.executorId || null,
-          is_active: dateItem.isActive
-        }
-      })
+      const tasksToCreate = selectedTaskDates
+        .map((dateItem) => {
+          const relatedTask = relatedTasks.find(t => {
+            const taskDate = t.planned_date.split('T')[0]
+            const match = taskDate === dateItem.date
+            if (!match) {
+              console.log('Date mismatch:', { taskDate, dateItemDate: dateItem.date, taskId: t.id, taskName: t.task_name })
+            }
+            return match
+          })
+          
+          const taskId = relatedTask?.id || selectedTaskId
+          
+          // Перевіряємо, чи задача вже призначена цьому клієнту
+          if (existingTaskIds.has(taskId)) {
+            console.warn('Task already assigned to client:', taskId, 'client:', selectedClientForTasks.id)
+            return null // Пропускаємо цю задачу
+          }
+          
+          // Для тім ліда group_id = user.id (ID тім ліда)
+          // Для інших ролей group_id = user.group_id (якщо є)
+          const groupId = isTeamLead ? user?.id : (user?.group_id || null)
+          
+          if (!groupId && isTeamLead) {
+            console.error('Team lead user.id is missing!', user)
+            throw new Error('Не вдалося визначити group_id для тім ліда')
+          }
+          
+          const taskData = {
+            task_id: taskId,
+            client_id: selectedClientForTasks.id,
+            department_id: selectedClientForTasks.departments?.[0]?.id || null,
+            group_id: groupId,
+            executor_id: dateItem.executorId || null,
+            is_active: dateItem.isActive
+          }
+          
+          console.log('Task to create:', taskData, 'relatedTask found:', !!relatedTask)
+          
+          return taskData
+        })
+        .filter((task): task is NonNullable<typeof task> => task !== null) // Видаляємо null значення
+
+      if (tasksToCreate.length === 0) {
+        setError('Всі обрані задачі вже призначені цьому клієнту')
+        return
+      }
+
+      console.log('Tasks to create (after filtering):', tasksToCreate)
 
       const created = await createMultipleAssignedTasks(tasksToCreate)
       
+      console.log('Created tasks result:', created)
+      
       if (created.length > 0) {
-        setSuccess(`Успішно призначено ${created.length} ${created.length === 1 ? 'задачу' : created.length < 5 ? 'задачі' : 'задач'}`)
-        // Оновлюємо список призначених задач
-        const updated = await getAssignedTasksByClient(selectedClientForTasks.id)
+        const skippedCount = tasksToCreate.length - created.length
+        let successMessage = `Успішно призначено ${created.length} ${created.length === 1 ? 'задачу' : created.length < 5 ? 'задачі' : 'задач'}`
+        if (skippedCount > 0) {
+          successMessage += `. ${skippedCount} ${skippedCount === 1 ? 'задача вже була призначена' : skippedCount < 5 ? 'задачі вже були призначені' : 'задач вже були призначені'}`
+        }
+        setSuccess(successMessage)
+        // Оновлюємо список ВСІХ призначених задач для клієнта (для фільтрації)
+        const allUpdated = await getAssignedTasksByClient(selectedClientForTasks.id)
+        setAllAssignedTasksForClient(allUpdated)
+        
+        // Оновлюємо список призначених задач для відображення (фільтровані по group_id для тім ліда)
+        const updated = isTeamLead && user?.id
+          ? await getAssignedTasksByClientAndGroup(selectedClientForTasks.id, user.id)
+          : allUpdated
         setAssignedTasks(updated)
         // Оновлюємо кількість задач у списку клієнтів
         await loadData()
@@ -1149,11 +1673,12 @@ export default function ClientsPage() {
         // (це відбудеться автоматично через фільтрацію в render, але можна явно оновити)
         // availableTasks залишається незмінним, фільтрація відбувається в render
       } else {
-        setError('Не вдалося призначити задачі')
+        console.error('createMultipleAssignedTasks returned empty array. Tasks to create:', tasksToCreate)
+        setError('Не вдалося призначити задачі. Можливо, всі обрані задачі вже призначені цьому клієнту або виникла помилка. Перевірте консоль для деталей.')
       }
     } catch (err: any) {
+      console.error('Error in handleAddAssignedTasks:', err)
       setError(err.message || 'Помилка призначення задач')
-      console.error(err)
     }
   }
 
@@ -1298,7 +1823,8 @@ export default function ClientsPage() {
           </thead>
           <tbody>
                         {groupClients.map((client) => (
-                <tr key={client.id}>
+                <React.Fragment key={client.id}>
+                <tr>
                             <td style={{ textAlign: 'center', padding: '8px' }}>
                               {client.activeTasksCount === undefined || client.activeTasksCount === 0 ? (
                                 <div
@@ -1315,6 +1841,7 @@ export default function ClientsPage() {
                                     transition: 'all 0.2s'
                                   }}
                                   title="Немає призначених задач"
+                                  onClick={() => toggleClientTasks(client.id)}
                                 >
                                   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                                     <circle cx="12" cy="12" r="10"></circle>
@@ -1331,14 +1858,15 @@ export default function ClientsPage() {
                                     gap: '6px',
                                     padding: '6px 12px',
                                     borderRadius: '16px',
-                                    backgroundColor: '#f3f4f6',
-                                    color: '#6b7280',
+                                    backgroundColor: expandedClientsWithTasks.has(client.id) ? '#4299e1' : '#f3f4f6',
+                                    color: expandedClientsWithTasks.has(client.id) ? '#ffffff' : '#6b7280',
                                     fontSize: '13px',
                                     fontWeight: '500',
                                     cursor: 'pointer',
                                     transition: 'all 0.2s'
                                   }}
-                                  title={`${client.activeTasksCount} ${client.activeTasksCount === 1 ? 'призначена задача' : client.activeTasksCount < 5 ? 'призначені задачі' : 'призначених задач'}`}
+                                  title={`${client.activeTasksCount} ${client.activeTasksCount === 1 ? 'призначена задача' : client.activeTasksCount < 5 ? 'призначені задачі' : 'призначених задач'}. Натисніть для перегляду`}
+                                  onClick={() => toggleClientTasks(client.id)}
                                 >
                                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                                     <path d="M9 11l3 3L22 4"></path>
@@ -1434,6 +1962,357 @@ export default function ClientsPage() {
                     </div>
                   </td>
                 </tr>
+                {/* Розгорнута секція з задачами клієнта */}
+                {expandedClientsWithTasks.has(client.id) && (
+                  <tr>
+                    <td colSpan={11} style={{ padding: '0', background: '#f7fafc' }}>
+                      <div style={{ padding: '20px' }}>
+                        {/* Навігація по періодах */}
+                        <div style={{ 
+                          display: 'flex', 
+                          justifyContent: 'space-between', 
+                          alignItems: 'center',
+                          marginBottom: '16px',
+                          padding: '12px',
+                          background: '#ffffff',
+                          borderRadius: '8px',
+                          border: '1px solid #e2e8f0'
+                        }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                            <button
+                              onClick={async () => {
+                                const period = clientTasksPeriod.get(client.id) || { type: 'week' as const, startDate: getCurrentWeekMonday() }
+                                const newStartDate = period.type === 'week' 
+                                  ? addDays(period.startDate, -7)
+                                  : addMonths(period.startDate, -1)
+                                setClientTasksPeriod(prev => {
+                                  const newMap = new Map(prev)
+                                  newMap.set(client.id, { ...period, startDate: newStartDate })
+                                  return newMap
+                                })
+                                await loadClientTasks(client.id)
+                                setClientTasksPage(prev => {
+                                  const newMap = new Map(prev)
+                                  newMap.set(client.id, 0)
+                                  return newMap
+                                })
+                              }}
+                              style={{
+                                padding: '6px 12px',
+                                background: '#f7fafc',
+                                border: '1px solid #e2e8f0',
+                                borderRadius: '6px',
+                                cursor: 'pointer',
+                                fontSize: '14px'
+                              }}
+                            >
+                              ← Попередній
+                            </button>
+                            <span style={{ fontSize: '14px', fontWeight: '500', color: '#2d3748' }}>
+                              {(() => {
+                                const period = clientTasksPeriod.get(client.id) || { type: 'week' as const, startDate: getCurrentWeekMonday() }
+                                if (period.type === 'week') {
+                                  const endDate = addDays(period.startDate, 6)
+                                  return `${formatDateToUA(period.startDate.toISOString().split('T')[0])} - ${formatDateToUA(endDate.toISOString().split('T')[0])}`
+                                } else {
+                                  return period.startDate.toLocaleDateString('uk-UA', { month: 'long', year: 'numeric' })
+                                }
+                              })()}
+                            </span>
+                            <button
+                              onClick={async () => {
+                                const period = clientTasksPeriod.get(client.id) || { type: 'week' as const, startDate: getCurrentWeekMonday() }
+                                const newStartDate = period.type === 'week' 
+                                  ? addDays(period.startDate, 7)
+                                  : addMonths(period.startDate, 1)
+                                setClientTasksPeriod(prev => {
+                                  const newMap = new Map(prev)
+                                  newMap.set(client.id, { ...period, startDate: newStartDate })
+                                  return newMap
+                                })
+                                await loadClientTasks(client.id)
+                                setClientTasksPage(prev => {
+                                  const newMap = new Map(prev)
+                                  newMap.set(client.id, 0)
+                                  return newMap
+                                })
+                              }}
+                              style={{
+                                padding: '6px 12px',
+                                background: '#f7fafc',
+                                border: '1px solid #e2e8f0',
+                                borderRadius: '6px',
+                                cursor: 'pointer',
+                                fontSize: '14px'
+                              }}
+                            >
+                              Наступний →
+                            </button>
+                            <button
+                              onClick={async () => {
+                                const period = clientTasksPeriod.get(client.id) || { type: 'week' as const, startDate: getCurrentWeekMonday() }
+                                const newType = period.type === 'week' ? 'month' : 'week'
+                                const newStartDate = newType === 'week' ? getCurrentWeekMonday() : new Date()
+                                setClientTasksPeriod(prev => {
+                                  const newMap = new Map(prev)
+                                  newMap.set(client.id, { type: newType, startDate: newStartDate })
+                                  return newMap
+                                })
+                                await loadClientTasks(client.id)
+                                setClientTasksPage(prev => {
+                                  const newMap = new Map(prev)
+                                  newMap.set(client.id, 0)
+                                  return newMap
+                                })
+                              }}
+                              style={{
+                                padding: '6px 12px',
+                                background: '#4299e1',
+                                color: '#ffffff',
+                                border: 'none',
+                                borderRadius: '6px',
+                                cursor: 'pointer',
+                                fontSize: '14px',
+                                fontWeight: '500'
+                              }}
+                            >
+                              {(() => {
+                                const period = clientTasksPeriod.get(client.id) || { type: 'week' as const, startDate: getCurrentWeekMonday() }
+                                return period.type === 'week' ? 'Показати місяць' : 'Показати тиждень'
+                              })()}
+                            </button>
+                          </div>
+                          <div style={{ display: 'flex', gap: '8px' }}>
+                            <button
+                              onClick={() => {
+                                setSelectedClientForCreateTask(client.id)
+                                setShowCreateTaskModal(true)
+                              }}
+                              style={{
+                                padding: '6px 12px',
+                                background: '#4299e1',
+                                color: '#ffffff',
+                                border: 'none',
+                                borderRadius: '6px',
+                                cursor: 'pointer',
+                                fontSize: '14px',
+                                fontWeight: '500'
+                              }}
+                            >
+                              ➕ Створити задачу
+                            </button>
+                            <button
+                              onClick={() => toggleClientTasks(client.id)}
+                              style={{
+                                padding: '6px 12px',
+                                background: '#f7fafc',
+                                border: '1px solid #e2e8f0',
+                                borderRadius: '6px',
+                                cursor: 'pointer',
+                                fontSize: '14px'
+                              }}
+                            >
+                              Згорнути
+                            </button>
+                          </div>
+                        </div>
+
+                        {/* Список задач */}
+                        {clientTasksLoading.has(client.id) ? (
+                          <div style={{ textAlign: 'center', padding: '40px' }}>Завантаження...</div>
+                        ) : (
+                          (() => {
+                            const tasks = clientTasks.get(client.id) || []
+                            const currentPage = clientTasksPage.get(client.id) || 0
+                            const TASKS_PER_PAGE = 20
+                            const startIndex = currentPage * TASKS_PER_PAGE
+                            const endIndex = startIndex + TASKS_PER_PAGE
+                            const paginatedTasks = tasks.slice(startIndex, endIndex)
+                            const totalPages = Math.ceil(tasks.length / TASKS_PER_PAGE)
+
+                            return (
+                              <>
+                                {tasks.length === 0 ? (
+                                  <div style={{ textAlign: 'center', padding: '40px', color: '#718096' }}>
+                                    Немає задач для цього періоду
+                                  </div>
+                                ) : (
+                                  <>
+                                    <div style={{ 
+                                      display: 'flex', 
+                                      flexDirection: 'column', 
+                                      gap: '12px',
+                                      marginBottom: '16px'
+                                    }}>
+                                      {paginatedTasks.map(task => {
+                                        // Використовуємо статус зі статистики (з логів), якщо він є, інакше автоматичне визначення
+                                        const stats = clientTaskTimeStats.get(task.id)
+                                        const status = stats?.status || getTaskStatus(task)
+                                        
+                                        const executorName = task.executor
+                                          ? [task.executor.surname, task.executor.name, task.executor.middle_name]
+                                              .filter(Boolean)
+                                              .join(' ') || task.executor.email
+                                          : 'Не призначено'
+                                        const taskDate = task.task?.planned_date 
+                                          ? formatDateToUA(task.task.planned_date.split('T')[0])
+                                          : 'Не вказано'
+                                        
+                                        // Час виконання з логів
+                                        const timeSpent = stats?.totalMinutes 
+                                          ? formatMinutesToHoursMinutes(stats.totalMinutes)
+                                          : task.completion_time_minutes 
+                                            ? formatMinutesToHoursMinutes(task.completion_time_minutes)
+                                            : null
+
+                                        return (
+                                          <div
+                                            key={task.id}
+                                            style={{
+                                              padding: '16px',
+                                              background: task.is_active ? '#ffffff' : '#f0f0f0',
+                                              borderRadius: '8px',
+                                              border: `1px solid ${task.is_active ? '#e2e8f0' : '#d0d0d0'}`,
+                                              opacity: task.is_active ? 1 : 0.7
+                                            }}
+                                          >
+                                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '8px' }}>
+                                              <div style={{ flex: 1 }}>
+                                                <h4 style={{ 
+                                                  fontSize: '16px', 
+                                                  fontWeight: '600', 
+                                                  color: task.is_active ? '#2d3748' : '#a0aec0',
+                                                  marginBottom: '8px'
+                                                }}>
+                                                  {task.task?.task_name || `Задача #${task.task_id}`}
+                                                </h4>
+                                                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '12px', fontSize: '14px', color: task.is_active ? '#718096' : '#a0aec0' }}>
+                                                  <span><strong>Дата:</strong> {taskDate}</span>
+                                                  <span><strong>Виконавець:</strong> {executorName}</span>
+                                                  {task.task?.task_type && (
+                                                    <span><strong>Тип:</strong> {getTaskTypeText(task.task.task_type)}</span>
+                                                  )}
+                                                  {timeSpent && (
+                                                    <span><strong>Час виконання:</strong> {timeSpent}</span>
+                                                  )}
+                                                </div>
+                                                {task.task?.description && (
+                                                  <p style={{ 
+                                                    marginTop: '8px', 
+                                                    fontSize: '14px', 
+                                                    color: task.is_active ? '#4a5568' : '#a0aec0',
+                                                    lineHeight: '1.5'
+                                                  }}>
+                                                    {task.task.description}
+                                                  </p>
+                                                )}
+                                              </div>
+                                              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                                <span className={`status-badge ${getStatusBadgeClass(status)}`} style={{ marginLeft: '12px' }}>
+                                                  {getStatusText(status)}
+                                                </span>
+                                                <button
+                                                  onClick={(e) => {
+                                                    e.stopPropagation()
+                                                    setEditingClientTaskId(task.id)
+                                                  }}
+                                                  style={{
+                                                    padding: '6px 12px',
+                                                    background: '#4299e1',
+                                                    border: 'none',
+                                                    borderRadius: '6px',
+                                                    cursor: 'pointer',
+                                                    fontSize: '12px',
+                                                    fontWeight: '500',
+                                                    color: '#ffffff',
+                                                    transition: 'all 0.2s',
+                                                    display: 'flex',
+                                                    alignItems: 'center',
+                                                    gap: '4px'
+                                                  }}
+                                                  onMouseEnter={(e) => {
+                                                    e.currentTarget.style.background = '#3182ce'
+                                                  }}
+                                                  onMouseLeave={(e) => {
+                                                    e.currentTarget.style.background = '#4299e1'
+                                                  }}
+                                                  title="Редагувати задачу"
+                                                >
+                                                  ✏️ Редагувати
+                                                </button>
+                                              </div>
+                                            </div>
+                                          </div>
+                                        )
+                                      })}
+                                    </div>
+
+                                    {/* Пагінація задач */}
+                                    {totalPages > 1 && (
+                                      <div style={{ 
+                                        display: 'flex', 
+                                        justifyContent: 'center', 
+                                        alignItems: 'center',
+                                        gap: '8px',
+                                        padding: '12px',
+                                        background: '#ffffff',
+                                        borderRadius: '8px',
+                                        border: '1px solid #e2e8f0'
+                                      }}>
+                                        <button
+                                          onClick={() => setClientTasksPage(prev => {
+                                            const newMap = new Map(prev)
+                                            newMap.set(client.id, Math.max(0, (newMap.get(client.id) || 0) - 1))
+                                            return newMap
+                                          })}
+                                          disabled={currentPage === 0}
+                                          style={{
+                                            padding: '6px 12px',
+                                            background: currentPage === 0 ? '#f7fafc' : '#4299e1',
+                                            color: currentPage === 0 ? '#a0aec0' : '#ffffff',
+                                            border: 'none',
+                                            borderRadius: '6px',
+                                            cursor: currentPage === 0 ? 'not-allowed' : 'pointer',
+                                            fontSize: '14px'
+                                          }}
+                                        >
+                                          ← Попередня
+                                        </button>
+                                        <span style={{ fontSize: '14px', color: '#2d3748' }}>
+                                          Сторінка {currentPage + 1} з {totalPages} (всього задач: {tasks.length})
+                                        </span>
+                                        <button
+                                          onClick={() => setClientTasksPage(prev => {
+                                            const newMap = new Map(prev)
+                                            newMap.set(client.id, Math.min(totalPages - 1, (newMap.get(client.id) || 0) + 1))
+                                            return newMap
+                                          })}
+                                          disabled={currentPage >= totalPages - 1}
+                                          style={{
+                                            padding: '6px 12px',
+                                            background: currentPage >= totalPages - 1 ? '#f7fafc' : '#4299e1',
+                                            color: currentPage >= totalPages - 1 ? '#a0aec0' : '#ffffff',
+                                            border: 'none',
+                                            borderRadius: '6px',
+                                            cursor: currentPage >= totalPages - 1 ? 'not-allowed' : 'pointer',
+                                            fontSize: '14px'
+                                          }}
+                                        >
+                                          Наступна →
+                                        </button>
+                                      </div>
+                                    )}
+                                  </>
+                                )}
+                              </>
+                            )
+                          })()
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                )}
+                </React.Fragment>
                         ))}
           </tbody>
         </table>
@@ -2075,7 +2954,7 @@ export default function ClientsPage() {
                     Вже призначені задачі
                   </h4>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                    {Array.from(groupAssignedTasksByName(assignedTasks).entries()).map(([baseName, groupTasks]: [string, AssignedTaskWithDetails[]]) => {
+                    {Array.from(groupedTasks.entries()).map(([baseName, groupTasks]: [string, AssignedTaskWithDetails[]]) => {
                       const isExpanded = expandedAssignedTaskGroups.has(baseName)
                       
                       return (
@@ -2337,17 +3216,23 @@ export default function ClientsPage() {
                                         </label>
                                         {isTeamLead ? (
                                           <div style={{ display: 'flex', alignItems: 'center', minHeight: '32px' }}>
-                                            <span className={`status-badge ${assigned.task_status ? 'status-active' : 'status-inactive'}`} style={{
+                                            {(() => {
+                                              const status = getTaskStatus(assigned)
+                                              return (
+                                                <span className={`status-badge ${getStatusBadgeClass(status)}`} style={{
                                               padding: '6px 12px',
                                               borderRadius: '16px',
                                               fontSize: '13px',
                                               fontWeight: '500',
                                               display: 'inline-block'
                                             }}>
-                                              {assigned.task_status || (assigned.is_active ? 'Не розпочато' : '-')}
+                                                  {getStatusText(status)}
                                             </span>
+                                              )
+                                            })()}
                                           </div>
                                         ) : (
+                                          <div style={{ width: '100%' }}>
                                           <select
                                             value={assigned.task_status || ''}
                                             onChange={(e) => handleUpdateTaskStatus(assigned.id, e.target.value)}
@@ -2369,12 +3254,25 @@ export default function ClientsPage() {
                                             }}
                                           >
                                             <option value="">-- Оберіть статус --</option>
-                                            <option value="В роботі">В роботі</option>
-                                            <option value="Виконано">Виконано</option>
-                                            <option value="Відкладено">Відкладено</option>
-                                            <option value="Скасовано">Скасовано</option>
-                                            <option value="Очікує">Очікує</option>
+                                              <option value="active">Активний</option>
+                                              <option value="in_progress">В процесі</option>
+                                              <option value="completed">Виконано</option>
+                                              <option value="pending">Очікує</option>
                                           </select>
+                                            {!assigned.task_status && (() => {
+                                              const autoStatus = getTaskStatus(assigned)
+                                              return (
+                                                <div style={{ 
+                                                  marginTop: '4px', 
+                                                  fontSize: '11px', 
+                                                  color: '#718096',
+                                                  fontStyle: 'italic'
+                                                }}>
+                                                  Поточний статус: {getStatusText(autoStatus)}
+                                                </div>
+                                              )
+                                            })()}
+                                          </div>
                                         )}
                                       </div>
 
@@ -2475,10 +3373,10 @@ export default function ClientsPage() {
                                             alignItems: 'center'
                                           }}>
                                             {(() => {
-                                              const minutes = assigned.completion_time_minutes ?? 0
-                                              const hours = Math.floor(minutes / 60)
-                                              const mins = minutes % 60
-                                              return `${hours} г. ${mins} хв.`
+                                              // Використовуємо час зі статистики (з логів), якщо він є, інакше з assigned_tasks
+                                              const stats = clientTaskTimeStats.get(assigned.id)
+                                              const totalMinutes = stats?.totalMinutes ?? assigned.completion_time_minutes ?? 0
+                                              return formatMinutesToHoursMinutes(totalMinutes) || '0 г. 0 хв.'
                                             })()}
                                           </div>
                                         ) : (
@@ -2692,6 +3590,300 @@ export default function ClientsPage() {
           </div>
         </div>
       )}
+
+      {/* Модальне вікно створення індивідуальної задачі */}
+      {showCreateTaskModal && selectedClientForCreateTask && (
+        <div className="modal-overlay" onClick={() => {
+          setShowCreateTaskModal(false)
+          setSelectedClientForCreateTask(null)
+          setNewTaskForm({
+            executor_id: null,
+            planned_date: '',
+            task_name: '',
+            category_id: null,
+            description: ''
+          })
+          setError(null)
+        }}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '600px' }}>
+            <div className="modal-header">
+              <h3>Створити індивідуальну задачу</h3>
+              <button className="modal-close" onClick={() => {
+                setShowCreateTaskModal(false)
+                setSelectedClientForCreateTask(null)
+                setNewTaskForm({
+                  executor_id: null,
+                  planned_date: '',
+                  task_name: '',
+                  category_id: null,
+                  description: ''
+                })
+                setError(null)
+              }}>×</button>
+    </div>
+            <div style={{ padding: '24px' }}>
+              {error && (
+                <div style={{ 
+                  padding: '12px', 
+                  background: '#fed7d7', 
+                  color: '#c53030', 
+                  borderRadius: '6px', 
+                  marginBottom: '16px' 
+                }}>
+                  {error}
+                </div>
+              )}
+
+              <div className="form-group">
+                <label>Виконавець *</label>
+                <select
+                  value={newTaskForm.executor_id || ''}
+                  onChange={(e) => setNewTaskForm({ ...newTaskForm, executor_id: e.target.value ? Number(e.target.value) : null })}
+                  style={{
+                    padding: '8px 12px',
+                    border: '1px solid #e2e8f0',
+                    borderRadius: '6px',
+                    fontSize: '14px',
+                    width: '100%'
+                  }}
+                >
+                  <option value="">Оберіть виконавця</option>
+                  {availableExecutorsForCreate.map(executor => {
+                    const fullName = [executor.surname, executor.name, executor.middle_name]
+                      .filter(Boolean)
+                      .join(' ') || executor.email
+                    return (
+                      <option key={executor.id} value={executor.id}>
+                        {fullName}
+                      </option>
+                    )
+                  })}
+                </select>
+              </div>
+
+              <div className="form-group">
+                <label>Дата виконання *</label>
+                <input
+                  type="date"
+                  value={newTaskForm.planned_date}
+                  onChange={(e) => setNewTaskForm({ ...newTaskForm, planned_date: e.target.value })}
+                  style={{
+                    padding: '8px 12px',
+                    border: '1px solid #e2e8f0',
+                    borderRadius: '6px',
+                    fontSize: '14px',
+                    width: '100%'
+                  }}
+                />
+              </div>
+
+              <div className="form-group">
+                <label>Назва задачі *</label>
+                <input
+                  type="text"
+                  value={newTaskForm.task_name}
+                  onChange={(e) => setNewTaskForm({ ...newTaskForm, task_name: e.target.value })}
+                  placeholder="Введіть назву задачі"
+                  style={{
+                    padding: '8px 12px',
+                    border: '1px solid #e2e8f0',
+                    borderRadius: '6px',
+                    fontSize: '14px',
+                    width: '100%'
+                  }}
+                />
+              </div>
+
+              <div className="form-group">
+                <label>Категорія</label>
+                <select
+                  value={newTaskForm.category_id || ''}
+                  onChange={(e) => setNewTaskForm({ ...newTaskForm, category_id: e.target.value ? Number(e.target.value) : null })}
+                  style={{
+                    padding: '8px 12px',
+                    border: '1px solid #e2e8f0',
+                    borderRadius: '6px',
+                    fontSize: '14px',
+                    width: '100%'
+                  }}
+                >
+                  <option value="">Оберіть категорію (необов'язково)</option>
+                  {taskCategories.map(category => (
+                    <option key={category.id} value={category.id}>
+                      {category.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="form-group">
+                <label>Опис</label>
+                <textarea
+                  value={newTaskForm.description}
+                  onChange={(e) => setNewTaskForm({ ...newTaskForm, description: e.target.value })}
+                  placeholder="Введіть опис задачі (необов'язково)"
+                  rows={4}
+                  style={{
+                    padding: '8px 12px',
+                    border: '1px solid #e2e8f0',
+                    borderRadius: '6px',
+                    fontSize: '14px',
+                    width: '100%',
+                    resize: 'vertical',
+                    fontFamily: 'inherit'
+                  }}
+                />
+              </div>
+
+              <div className="modal-actions">
+                <button
+                  className="btn-secondary"
+                  onClick={() => {
+                    setShowCreateTaskModal(false)
+                    setSelectedClientForCreateTask(null)
+                    setNewTaskForm({
+                      executor_id: null,
+                      planned_date: '',
+                      task_name: '',
+                      category_id: null,
+                      description: ''
+                    })
+                    setError(null)
+                  }}
+                >
+                  Скасувати
+                </button>
+                <button
+                  className="btn-primary"
+                  onClick={handleCreateIndividualTask}
+                  style={{
+                    background: '#4299e1',
+                    color: '#ffffff'
+                  }}
+                >
+                  Створити задачу
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Модальне вікно редагування задачі клієнта */}
+      {editingClientTaskId && (() => {
+        const clientId = Array.from(clientTasks.entries()).find(([_, tasks]) => 
+          tasks.some(t => t.id === editingClientTaskId)
+        )?.[0]
+        const tasks = clientId ? clientTasks.get(clientId) || [] : []
+        const task = tasks.find(t => t.id === editingClientTaskId)
+        
+        if (!task || !clientId) return null
+
+        const taskName = task.task?.task_name || `Задача #${task.task_id}`
+        const taskType = task.task?.task_type || 'Планова задача'
+
+        return (
+          <div className="modal-overlay" onClick={() => setEditingClientTaskId(null)}>
+            <div className="modal-content" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '500px' }}>
+              <div className="modal-header">
+                <h3>Редагувати задачу</h3>
+                <button className="modal-close" onClick={() => setEditingClientTaskId(null)}>×</button>
+              </div>
+              <div style={{ padding: '24px' }}>
+                <div style={{ marginBottom: '20px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px', flexWrap: 'wrap' }}>
+                    <h4 style={{ fontSize: '18px', fontWeight: '600', color: '#2d3748', margin: 0 }}>
+                      {taskName}
+                    </h4>
+                    {task.task?.task_type && (
+                      <span style={{
+                        padding: '4px 10px',
+                        borderRadius: '12px',
+                        fontSize: '11px',
+                        fontWeight: '600',
+                        background: '#e6f3ff',
+                        color: '#2c5282',
+                        textTransform: 'uppercase',
+                        letterSpacing: '0.5px'
+                      }}>
+                        {getTaskTypeText(taskType)}
+                      </span>
+                    )}
+                  </div>
+                  <p style={{ fontSize: '14px', color: '#718096' }}>
+                    Клієнт: <span style={{ fontWeight: '500', color: '#4a5568' }}>{task.client?.legal_name || 'Не вказано'}</span>
+                  </p>
+                </div>
+
+                <div className="form-group">
+                  <label>Виконавець</label>
+                  <select
+                    value={task.executor_id || ''}
+                    onChange={(e) => {
+                      const executorId = e.target.value ? Number(e.target.value) : null
+                      handleUpdateClientTaskExecutor(task.id, executorId, clientId)
+                    }}
+                    style={{
+                      padding: '12px 16px',
+                      border: '2px solid #e2e8f0',
+                      borderRadius: '10px',
+                      fontSize: '15px',
+                      background: 'white',
+                      color: '#2d3748',
+                      fontWeight: '500',
+                      width: '100%',
+                      cursor: 'pointer'
+                    }}
+                  >
+                    <option value="">Не призначено</option>
+                    {availableExecutorsForCreate.map((executor) => {
+                      const fullName = [executor.surname, executor.name, executor.middle_name]
+                        .filter(Boolean)
+                        .join(' ') || executor.email
+                      return (
+                        <option key={executor.id} value={executor.id}>
+                          {fullName}
+                        </option>
+                      )
+                    })}
+                  </select>
+                </div>
+
+                <div className="form-group">
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}>
+                    <input
+                      type="checkbox"
+                      checked={task.is_active}
+                      onChange={() => handleToggleClientTaskActive(task.id, clientId)}
+                      style={{
+                        width: '18px',
+                        height: '18px',
+                        cursor: 'pointer'
+                      }}
+                    />
+                    <span>Активна задача</span>
+                  </label>
+                  <p style={{ fontSize: '12px', color: '#718096', marginTop: '4px', marginLeft: '26px' }}>
+                    {task.is_active 
+                      ? 'Задача активна і відображається в календарі'
+                      : 'Задача деактивована і не відображається в календарі'
+                    }
+                  </p>
+                </div>
+
+                <div className="modal-actions">
+                  <button
+                    className="btn-secondary"
+                    onClick={() => setEditingClientTaskId(null)}
+                  >
+                    Закрити
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )
+      })()}
     </div>
   )
 }

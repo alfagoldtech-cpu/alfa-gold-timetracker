@@ -8,6 +8,10 @@ if (!import.meta.env.VITE_SUPABASE_ANON_KEY) {
   console.warn('⚠️ Аутентифікація може не працювати без правильного ключа')
 }
 
+if (!supabaseUrl) {
+  console.error('❌ VITE_SUPABASE_URL не налаштовано. Перевірте файл .env.local')
+}
+
 export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
   auth: {
     persistSession: true,

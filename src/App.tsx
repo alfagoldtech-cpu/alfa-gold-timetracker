@@ -1,6 +1,7 @@
 import { useEffect } from 'react'
 import { BrowserRouter as Router, Routes, Route, Navigate, useLocation } from 'react-router-dom'
 import { AuthProvider, useAuth } from './contexts/AuthContext'
+import { ActiveTaskProvider } from './contexts/ActiveTaskContext'
 import { supabase } from './lib/supabase'
 import LoginPage from './pages/LoginPage'
 import ChangePasswordPage from './pages/ChangePasswordPage'
@@ -9,7 +10,10 @@ import AdminDashboard from './pages/AdminDashboard'
 import ManagerDashboard from './pages/ManagerDashboard'
 import ProjectViewPage from './pages/ProjectViewPage'
 import ClientViewPage from './pages/ClientViewPage'
+import EmployeeViewPage from './pages/EmployeeViewPage'
+import MyCalendarPage from './pages/MyCalendarPage'
 import LoadingSpinner from './components/LoadingSpinner'
+import TaskPlayer from './components/TaskPlayer'
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const location = useLocation()
@@ -54,10 +58,48 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
 }
 
 function DashboardRoute() {
-  const { user, loading } = useAuth()
+  const { user, authUser, loading } = useAuth()
 
   if (loading) {
     return <LoadingSpinner />
+  }
+
+  // Якщо користувач авторизований, але дані користувача не завантажені
+  if (authUser && !user) {
+    return (
+      <div style={{
+        display: 'flex',
+        flexDirection: 'column',
+        justifyContent: 'center',
+        alignItems: 'center',
+        height: '100vh',
+        padding: '20px',
+        textAlign: 'center'
+      }}>
+        <h1 style={{ color: '#c33', marginBottom: '20px' }}>Помилка завантаження даних</h1>
+        <p style={{ color: '#666', marginBottom: '20px' }}>
+          Не вдалося завантажити дані користувача. Перевірте підключення до бази даних.
+        </p>
+        <button
+          onClick={() => window.location.reload()}
+          style={{
+            padding: '10px 20px',
+            background: '#ff6b35',
+            color: 'white',
+            border: 'none',
+            borderRadius: '8px',
+            cursor: 'pointer'
+          }}
+        >
+          Перезавантажити сторінку
+        </button>
+      </div>
+    )
+  }
+
+  // Якщо користувач не авторизований (не повинно статися через ProtectedRoute, але на всяк випадок)
+  if (!authUser) {
+    return <Navigate to="/login" replace />
   }
 
   // role_id 1 = Адміністратор
@@ -178,6 +220,22 @@ function AppRoutes() {
           </ProtectedRoute>
         } 
       />
+      <Route 
+        path="/employees/:id" 
+        element={
+          <ProtectedRoute>
+            <EmployeeViewPage />
+          </ProtectedRoute>
+        } 
+      />
+      <Route 
+        path="/my-calendar" 
+        element={
+          <ProtectedRoute>
+            <MyCalendarPage />
+          </ProtectedRoute>
+        } 
+      />
       <Route path="/" element={<Navigate to="/login" replace />} />
     </Routes>
   )
@@ -186,9 +244,12 @@ function AppRoutes() {
 function App() {
   return (
     <AuthProvider>
-      <Router>
-        <AppRoutes />
-      </Router>
+      <ActiveTaskProvider>
+        <Router>
+          <AppRoutes />
+          <TaskPlayer />
+        </Router>
+      </ActiveTaskProvider>
     </AuthProvider>
   )
 }

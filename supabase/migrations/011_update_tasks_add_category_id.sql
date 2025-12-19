@@ -45,3 +45,6 @@ END $$;
 -- АЛЕ: залишаємо його поки що для сумісності, можна видалити пізніше
 -- ALTER TABLE tasks DROP COLUMN IF EXISTS category;
 
+
+
+

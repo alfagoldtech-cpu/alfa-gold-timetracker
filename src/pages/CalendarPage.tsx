@@ -338,8 +338,11 @@ export default function CalendarPage() {
 
     setLoading(true)
     try {
-      const tasksData = await getTasksByProject(user.project_id)
-      setTasks(tasksData)
+      const allTasks = await getTasksByProject(user.project_id)
+      // Фільтруємо тільки планові задачі (створені Керівником виробництва)
+      const plannedTasks = allTasks.filter(task => task.task_type === 'Планова задача')
+      console.log('Loaded all tasks:', allTasks.length, 'planned tasks:', plannedTasks.length)
+      setTasks(plannedTasks)
     } catch (err) {
       console.error('Error loading tasks:', err)
       setError('Не вдалося завантажити задачі')
@@ -391,7 +394,7 @@ export default function CalendarPage() {
         newSet.add(baseName)
         // Ініціалізуємо дати для редагування
         const firstTask = groupTasks[0]
-        if (firstTask.task_type === 'month') {
+        if (firstTask.recurrence_type === 'month') {
           const monthlyDates = groupTasks.map(task => {
             const date = new Date(task.planned_date)
             return {
@@ -405,7 +408,7 @@ export default function CalendarPage() {
             newMap.set(baseName, monthlyDates)
             return newMap
           })
-        } else if (firstTask.task_type === 'quarter') {
+        } else if (firstTask.recurrence_type === 'quarter') {
           const quarterlyDates = groupTasks.map(task => {
             const date = new Date(task.planned_date)
             const quarter = Math.floor(date.getMonth() / 3) + 1
@@ -420,7 +423,7 @@ export default function CalendarPage() {
             newMap.set(baseName, quarterlyDates)
             return newMap
           })
-        } else if (firstTask.task_type === 'year') {
+        } else if (firstTask.recurrence_type === 'year') {
           setEditingGroupDates(prev => {
             const newMap = new Map(prev)
             newMap.set(baseName, [{
@@ -471,7 +474,7 @@ export default function CalendarPage() {
     // Заповнюємо форму даними
     setTaskForm({
       task_name: baseName,
-      task_type: firstTask.task_type || 'month',
+      task_type: firstTask.recurrence_type || 'month',
       category_id: firstTask.category_id || 0,
       description: firstTask.description || '',
       year: new Date(firstTask.planned_date).getFullYear(),
@@ -491,7 +494,7 @@ export default function CalendarPage() {
     }
 
     // Встановлюємо дати залежно від типу
-    if (firstTask.task_type === 'month') {
+    if (firstTask.recurrence_type === 'month') {
       const monthlyDates = groupTasks.map(task => {
         const date = new Date(task.planned_date)
         return {
@@ -500,7 +503,7 @@ export default function CalendarPage() {
         }
       }).sort((a, b) => a.month - b.month)
       setMonthlyTasks(monthlyDates)
-    } else if (firstTask.task_type === 'quarter') {
+    } else if (firstTask.recurrence_type === 'quarter') {
       const quarterlyDates = groupTasks.map(task => {
         const date = new Date(task.planned_date)
         const quarter = Math.floor(date.getMonth() / 3) + 1
@@ -510,7 +513,7 @@ export default function CalendarPage() {
         }
       }).sort((a, b) => a.quarter - b.quarter)
       setQuarterlyTasks(quarterlyDates)
-    } else if (firstTask.task_type === 'year') {
+    } else if (firstTask.recurrence_type === 'year') {
       setYearlyTask({ date: firstTask.planned_date.split('T')[0] })
     }
 
@@ -570,28 +573,43 @@ export default function CalendarPage() {
         }
 
         // Створюємо всі нові задачі
+        console.log('Updating tasks:', tasksToCreate.length, 'tasks')
         const results = await Promise.all(
-          tasksToCreate.map(taskData =>
-            createTask({
-              project_id: user.project_id!,
-              task_name: taskData.task_name,
-              task_type: taskForm.task_type,
-              category_id: taskForm.category_id || undefined,
-              planned_date: taskData.planned_date,
-              description: taskForm.description || undefined
-            })
-          )
+          tasksToCreate.map(async (taskData) => {
+            try {
+              console.log('Creating task:', taskData.task_name, 'with date:', taskData.planned_date)
+              const task = await createTask({
+                project_id: user.project_id!,
+                task_name: taskData.task_name,
+                task_type: 'Планова задача', // Встановлюємо тип задачі
+                recurrence_type: taskForm.task_type, // Зберігаємо тип повторюваності
+                category_id: taskForm.category_id || undefined,
+                planned_date: taskData.planned_date,
+                description: taskForm.description || undefined
+              })
+              if (!task) {
+                console.error('Failed to create task:', taskData.task_name)
+              } else {
+                console.log('Task created successfully:', task.id, task.task_name)
+              }
+              return task
+            } catch (err) {
+              console.error('Error creating task:', taskData.task_name, err)
+              return null
+            }
+          })
         )
 
         const successCount = results.filter(r => r !== null).length
+        console.log('Created tasks count:', successCount, 'out of', tasksToCreate.length)
         
         if (successCount > 0) {
           setSuccess(`Задачі "${taskForm.task_name}" успішно оновлено`)
           resetTaskForm()
           setShowCreateModal(false)
           await loadTasks()
-      } else {
-          setError('Не вдалося оновити задачі')
+        } else {
+          setError('Не вдалося оновити задачі. Перевірте консоль для деталей.')
         }
       } else {
         // Створення нової задачі
@@ -622,29 +640,44 @@ export default function CalendarPage() {
       }
 
       // Створюємо всі задачі
+      console.log('Creating tasks:', tasksToCreate.length, 'tasks')
       const results = await Promise.all(
-        tasksToCreate.map(taskData =>
-          createTask({
-            project_id: user.project_id!,
-            task_name: taskData.task_name,
-              task_type: taskForm.task_type,
+        tasksToCreate.map(async (taskData) => {
+          try {
+            console.log('Creating task:', taskData.task_name, 'with date:', taskData.planned_date)
+            const task = await createTask({
+              project_id: user.project_id!,
+              task_name: taskData.task_name,
+              task_type: 'Планова задача', // Встановлюємо тип задачі
+              recurrence_type: taskForm.task_type, // Зберігаємо тип повторюваності
               category_id: taskForm.category_id || undefined,
-            planned_date: taskData.planned_date,
+              planned_date: taskData.planned_date,
               description: taskForm.description || undefined
-          })
-        )
+            })
+            if (!task) {
+              console.error('Failed to create task:', taskData.task_name)
+            } else {
+              console.log('Task created successfully:', task.id, task.task_name)
+            }
+            return task
+          } catch (err) {
+            console.error('Error creating task:', taskData.task_name, err)
+            return null
+          }
+        })
       )
 
       const successCount = results.filter(r => r !== null).length
+      console.log('Created tasks count:', successCount, 'out of', tasksToCreate.length)
       
       if (successCount > 0) {
         setSuccess(`Створено ${successCount} задач(и)`)
-          resetTaskForm()
+        resetTaskForm()
         setShowCreateModal(false)
         await loadTasks()
       } else {
-        setError('Не вдалося створити задачі')
-        }
+        setError('Не вдалося створити задачі. Перевірте консоль для деталей.')
+      }
       }
     } catch (err: any) {
       setError(err.message || (editingTaskId ? 'Помилка оновлення задачі' : 'Помилка створення задачі'))
@@ -970,7 +1003,8 @@ export default function CalendarPage() {
                         )}
                       </div>
                       <div style={{ display: 'flex', gap: '16px', fontSize: '14px', color: '#718096' }}>
-                        <span>Тип: {getTaskTypeText(firstTask.task_type) || '-'}</span>
+                        <span>Тип задачі: {getTaskTypeText(firstTask.task_type) || '-'}</span>
+                        <span>Повторюваність: {getTaskTypeText(firstTask.recurrence_type) || '-'}</span>
                         <span>Категорія: {categoryName}</span>
                         <span>Задач: {groupTasks.length}</span>
                       </div>
@@ -1023,7 +1057,7 @@ export default function CalendarPage() {
                       borderTop: '1px solid #e2e8f0'
                     }}
                   >
-                    {firstTask.task_type === 'month' && editingGroupDates.has(baseName) && (
+                    {firstTask.recurrence_type === 'month' && editingGroupDates.has(baseName) && (
                       <div>
                         <div style={{ 
                           display: 'grid', 
@@ -1043,14 +1077,8 @@ export default function CalendarPage() {
                               <input
                                 type="text"
                                 value={formatDateToUA(dateItem.date)}
-                                onChange={(e) => {
-                                  if (!isTeamLead) {
-                                    handleDateInputChange(e.target.value, index, baseName, dateItem.taskId)
-                                  }
-                                }}
-                                readOnly={isTeamLead}
+                                readOnly={true}
                                 placeholder="дд.ММ.рррр"
-                                maxLength={10}
                                 style={{
                                   padding: '8px 12px',
                                   border: '2px solid #e2e8f0',
@@ -1058,36 +1086,9 @@ export default function CalendarPage() {
                                   fontSize: '14px',
                                   width: '100%',
                                   color: '#2d3748',
-                                  backgroundColor: isTeamLead ? '#f7fafc' : '#ffffff',
+                                  backgroundColor: '#f7fafc',
                                   transition: 'all 0.2s',
-                                  cursor: isTeamLead ? 'default' : 'text'
-                                }}
-                                onMouseEnter={(e) => {
-                                  if (!isTeamLead) {
-                                    e.currentTarget.style.borderColor = '#cbd5e0'
-                                  }
-                                }}
-                                onMouseLeave={(e) => {
-                                  e.currentTarget.style.borderColor = '#e2e8f0'
-                                }}
-                                onFocus={(e) => {
-                                  if (!isTeamLead) {
-                                    e.currentTarget.style.borderColor = '#ff6b35'
-                                    e.currentTarget.style.boxShadow = '0 0 0 4px rgba(255, 107, 53, 0.1)'
-                                    e.currentTarget.style.backgroundColor = '#fafafa'
-                                  }
-                                }}
-                                onBlur={(e) => {
-                                  if (!isTeamLead) {
-                                    e.currentTarget.style.borderColor = '#e2e8f0'
-                                    e.currentTarget.style.boxShadow = 'none'
-                                    e.currentTarget.style.backgroundColor = '#ffffff'
-                                    // Якщо дата не повна, відновлюємо попереднє значення
-                                    const currentValue = e.target.value
-                                    if (currentValue.length < 10 && dateItem.date) {
-                                      e.target.value = formatDateToUA(dateItem.date)
-                                    }
-                                  }
+                                  cursor: 'default'
                                 }}
                               />
                             </div>
@@ -1096,7 +1097,7 @@ export default function CalendarPage() {
                       </div>
                     )}
 
-                    {firstTask.task_type === 'quarter' && editingGroupDates.has(baseName) && (
+                    {firstTask.recurrence_type === 'quarter' && editingGroupDates.has(baseName) && (
                       <div>
                         <div style={{ 
                           display: 'grid', 
@@ -1116,14 +1117,8 @@ export default function CalendarPage() {
                               <input
                                 type="text"
                                 value={formatDateToUA(dateItem.date)}
-                                onChange={(e) => {
-                                  if (!isTeamLead) {
-                                    handleDateInputChange(e.target.value, index, baseName, dateItem.taskId)
-                                  }
-                                }}
-                                readOnly={isTeamLead}
+                                readOnly={true}
                                 placeholder="дд.ММ.рррр"
-                                maxLength={10}
                                 style={{
                                   padding: '8px 12px',
                                   border: '2px solid #e2e8f0',
@@ -1131,36 +1126,9 @@ export default function CalendarPage() {
                                   fontSize: '14px',
                                   width: '100%',
                                   color: '#2d3748',
-                                  backgroundColor: isTeamLead ? '#f7fafc' : '#ffffff',
+                                  backgroundColor: '#f7fafc',
                                   transition: 'all 0.2s',
-                                  cursor: isTeamLead ? 'default' : 'text'
-                                }}
-                                onMouseEnter={(e) => {
-                                  if (!isTeamLead) {
-                                    e.currentTarget.style.borderColor = '#cbd5e0'
-                                  }
-                                }}
-                                onMouseLeave={(e) => {
-                                  e.currentTarget.style.borderColor = '#e2e8f0'
-                                }}
-                                onFocus={(e) => {
-                                  if (!isTeamLead) {
-                                    e.currentTarget.style.borderColor = '#ff6b35'
-                                    e.currentTarget.style.boxShadow = '0 0 0 4px rgba(255, 107, 53, 0.1)'
-                                    e.currentTarget.style.backgroundColor = '#fafafa'
-                                  }
-                                }}
-                                onBlur={(e) => {
-                                  if (!isTeamLead) {
-                                    e.currentTarget.style.borderColor = '#e2e8f0'
-                                    e.currentTarget.style.boxShadow = 'none'
-                                    e.currentTarget.style.backgroundColor = '#ffffff'
-                                    // Якщо дата не повна, відновлюємо попереднє значення
-                                    const currentValue = e.target.value
-                                    if (currentValue.length < 10 && dateItem.date) {
-                                      e.target.value = formatDateToUA(dateItem.date)
-                                    }
-                                  }
+                                  cursor: 'default'
                                 }}
                               />
                             </div>
@@ -1169,22 +1137,13 @@ export default function CalendarPage() {
                       </div>
                     )}
 
-                    {firstTask.task_type === 'year' && editingGroupDates.has(baseName) && (
+                    {firstTask.recurrence_type === 'year' && editingGroupDates.has(baseName) && (
                       <div>
                         <input
                           type="text"
                           value={editingGroupDates.get(baseName)?.[0] ? formatDateToUA(editingGroupDates.get(baseName)![0].date) : ''}
-                          onChange={(e) => {
-                            if (!isTeamLead) {
-                              const dateItem = editingGroupDates.get(baseName)?.[0]
-                              if (dateItem) {
-                                handleDateInputChange(e.target.value, 0, baseName, dateItem.taskId)
-                              }
-                            }
-                          }}
-                          readOnly={isTeamLead}
+                          readOnly={true}
                           placeholder="дд.ММ.рррр"
-                          maxLength={10}
                           style={{
                             padding: '8px 12px',
                             border: '2px solid #e2e8f0',
@@ -1192,37 +1151,9 @@ export default function CalendarPage() {
                             fontSize: '14px',
                             maxWidth: '200px',
                             color: '#2d3748',
-                            backgroundColor: isTeamLead ? '#f7fafc' : '#ffffff',
+                            backgroundColor: '#f7fafc',
                             transition: 'all 0.2s',
-                            cursor: isTeamLead ? 'default' : 'text'
-                          }}
-                          onMouseEnter={(e) => {
-                            if (!isTeamLead) {
-                              e.currentTarget.style.borderColor = '#cbd5e0'
-                            }
-                          }}
-                          onMouseLeave={(e) => {
-                            e.currentTarget.style.borderColor = '#e2e8f0'
-                          }}
-                          onFocus={(e) => {
-                            if (!isTeamLead) {
-                              e.currentTarget.style.borderColor = '#ff6b35'
-                              e.currentTarget.style.boxShadow = '0 0 0 4px rgba(255, 107, 53, 0.1)'
-                              e.currentTarget.style.backgroundColor = '#fafafa'
-                            }
-                          }}
-                          onBlur={(e) => {
-                            if (!isTeamLead) {
-                              e.currentTarget.style.borderColor = '#e2e8f0'
-                              e.currentTarget.style.boxShadow = 'none'
-                              e.currentTarget.style.backgroundColor = '#ffffff'
-                              // Якщо дата не повна, відновлюємо попереднє значення
-                              const dateItem = editingGroupDates.get(baseName)?.[0]
-                              const currentValue = e.target.value
-                              if (currentValue.length < 10 && dateItem?.date) {
-                                e.target.value = formatDateToUA(dateItem.date)
-                              }
-                            }
+                            cursor: 'default'
                           }}
                         />
                       </div>
@@ -1398,37 +1329,34 @@ export default function CalendarPage() {
                           {getMonthName(task.month)}
                         </label>
                         <input
-                          type="text"
-                          value={formatDateToUA(task.date)}
+                          type="date"
+                          value={task.date}
                           onChange={(e) => {
-                            const value = e.target.value
-                            // Видаляємо всі символи крім цифр
-                            let cleaned = value.replace(/\D/g, '')
-                            
-                            // Обмежуємо довжину до 8 цифр (ддММрррр)
-                            if (cleaned.length > 8) {
-                              cleaned = cleaned.substring(0, 8)
-                            }
-                            
-                            // Форматуємо як дд.ММ.рррр
-                            let formatted = cleaned
-                            if (cleaned.length > 2) {
-                              formatted = cleaned.substring(0, 2) + '.' + cleaned.substring(2)
-                            }
-                            if (cleaned.length > 4) {
-                              formatted = cleaned.substring(0, 2) + '.' + cleaned.substring(2, 4) + '.' + cleaned.substring(4)
-                            }
-                            
-                            // Оновлюємо відображення
-                            const isoDate = parseDateToISO(formatted)
-                            if (isoDate) {
-                              updateMonthlyDate(index, isoDate)
+                            if (e.target.value) {
+                              updateMonthlyDate(index, e.target.value)
                             }
                           }}
-                          placeholder="дд.ММ.рррр"
-                          maxLength={10}
                           className="month-date-input"
                           required
+                          style={{
+                            padding: '8px 12px',
+                            border: '2px solid #e2e8f0',
+                            borderRadius: '8px',
+                            fontSize: '14px',
+                            width: '100%',
+                            color: '#2d3748',
+                            backgroundColor: '#ffffff',
+                            transition: 'all 0.2s',
+                            cursor: 'pointer'
+                          }}
+                          onFocus={(e) => {
+                            e.currentTarget.style.borderColor = '#ff6b35'
+                            e.currentTarget.style.boxShadow = '0 0 0 4px rgba(255, 107, 53, 0.1)'
+                          }}
+                          onBlur={(e) => {
+                            e.currentTarget.style.borderColor = '#e2e8f0'
+                            e.currentTarget.style.boxShadow = 'none'
+                          }}
                         />
                       </div>
                     ))}
@@ -1458,37 +1386,34 @@ export default function CalendarPage() {
                           {getQuarterName(task.quarter)}
                         </label>
                         <input
-                          type="text"
-                          value={formatDateToUA(task.date)}
+                          type="date"
+                          value={task.date}
                           onChange={(e) => {
-                            const value = e.target.value
-                            // Видаляємо всі символи крім цифр
-                            let cleaned = value.replace(/\D/g, '')
-                            
-                            // Обмежуємо довжину до 8 цифр (ддММрррр)
-                            if (cleaned.length > 8) {
-                              cleaned = cleaned.substring(0, 8)
-                            }
-                            
-                            // Форматуємо як дд.ММ.рррр
-                            let formatted = cleaned
-                            if (cleaned.length > 2) {
-                              formatted = cleaned.substring(0, 2) + '.' + cleaned.substring(2)
-                            }
-                            if (cleaned.length > 4) {
-                              formatted = cleaned.substring(0, 2) + '.' + cleaned.substring(2, 4) + '.' + cleaned.substring(4)
-                            }
-                            
-                            // Оновлюємо відображення
-                            const isoDate = parseDateToISO(formatted)
-                            if (isoDate) {
-                              updateQuarterlyDate(index, isoDate)
+                            if (e.target.value) {
+                              updateQuarterlyDate(index, e.target.value)
                             }
                           }}
-                          placeholder="дд.ММ.рррр"
-                          maxLength={10}
                           className="quarter-date-input"
                           required
+                          style={{
+                            padding: '8px 12px',
+                            border: '2px solid #e2e8f0',
+                            borderRadius: '8px',
+                            fontSize: '14px',
+                            width: '100%',
+                            color: '#2d3748',
+                            backgroundColor: '#ffffff',
+                            transition: 'all 0.2s',
+                            cursor: 'pointer'
+                          }}
+                          onFocus={(e) => {
+                            e.currentTarget.style.borderColor = '#ff6b35'
+                            e.currentTarget.style.boxShadow = '0 0 0 4px rgba(255, 107, 53, 0.1)'
+                          }}
+                          onBlur={(e) => {
+                            e.currentTarget.style.borderColor = '#e2e8f0'
+                            e.currentTarget.style.boxShadow = 'none'
+                          }}
                         />
                       </div>
                     ))}
@@ -1514,42 +1439,33 @@ export default function CalendarPage() {
                   />
                   <label>Планова дата *</label>
                   <input
-                    type="text"
-                    value={formatDateToUA(yearlyTask.date)}
+                    type="date"
+                    value={yearlyTask.date}
                     onChange={(e) => {
-                      const value = e.target.value
-                      // Видаляємо всі символи крім цифр
-                      let cleaned = value.replace(/\D/g, '')
-                      
-                      // Обмежуємо довжину до 8 цифр (ддММрррр)
-                      if (cleaned.length > 8) {
-                        cleaned = cleaned.substring(0, 8)
-                      }
-                      
-                      // Форматуємо як дд.ММ.рррр
-                      let formatted = cleaned
-                      if (cleaned.length > 2) {
-                        formatted = cleaned.substring(0, 2) + '.' + cleaned.substring(2)
-                      }
-                      if (cleaned.length > 4) {
-                        formatted = cleaned.substring(0, 2) + '.' + cleaned.substring(2, 4) + '.' + cleaned.substring(4)
-                      }
-                      
-                      // Оновлюємо відображення
-                      const isoDate = parseDateToISO(formatted)
-                      if (isoDate) {
-                        setYearlyTask({ date: isoDate })
-                      } else if (formatted.length === 10) {
-                        // Якщо формат правильний, але дата невалідна, все одно оновлюємо
-                        const parsed = parseDateToISO(formatted)
-                        if (parsed) {
-                          setYearlyTask({ date: parsed })
-                        }
+                      if (e.target.value) {
+                        setYearlyTask({ date: e.target.value })
                       }
                     }}
-                    placeholder="дд.ММ.рррр"
-                    maxLength={10}
                     required
+                    style={{
+                      padding: '8px 12px',
+                      border: '2px solid #e2e8f0',
+                      borderRadius: '8px',
+                      fontSize: '14px',
+                      width: '100%',
+                      color: '#2d3748',
+                      backgroundColor: '#ffffff',
+                      transition: 'all 0.2s',
+                      cursor: 'pointer'
+                    }}
+                    onFocus={(e) => {
+                      e.currentTarget.style.borderColor = '#ff6b35'
+                      e.currentTarget.style.boxShadow = '0 0 0 4px rgba(255, 107, 53, 0.1)'
+                    }}
+                    onBlur={(e) => {
+                      e.currentTarget.style.borderColor = '#e2e8f0'
+                      e.currentTarget.style.boxShadow = 'none'
+                    }}
                   />
                 </div>
               )}

@@ -11,3 +11,6 @@ CREATE INDEX IF NOT EXISTS idx_users_group_id ON users(group_id);
 -- Коментар для документації
 COMMENT ON COLUMN users.group_id IS 'ID тім ліда, який створив цього співробітника. NULL означає, що співробітник не належить до групи.';
 
+
+
+

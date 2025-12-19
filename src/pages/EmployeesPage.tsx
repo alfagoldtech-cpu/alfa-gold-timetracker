@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../contexts/AuthContext'
 import { 
   getUsersByProject, 
@@ -30,6 +31,7 @@ interface EmployeeWithRole extends User {
 
 export default function EmployeesPage() {
   const { user } = useAuth()
+  const navigate = useNavigate()
   const [employees, setEmployees] = useState<EmployeeWithRole[]>([])
   const [groupMembers, setGroupMembers] = useState<EmployeeWithRole[]>([])
   const [employeesWithoutGroup, setEmployeesWithoutGroup] = useState<EmployeeWithRole[]>([])
@@ -412,8 +414,7 @@ export default function EmployeesPage() {
   }
 
   const handleViewEmployee = (employee: EmployeeWithRole) => {
-    setSelectedEmployee(employee)
-    setShowViewModal(true)
+    navigate(`/employees/${employee.id}`)
   }
 
   const handleEditEmployee = async (employee: EmployeeWithRole) => {

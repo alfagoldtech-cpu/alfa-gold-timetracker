@@ -22,3 +22,6 @@ COMMENT ON COLUMN assigned_tasks.task_status IS 'Статус виконання
 COMMENT ON COLUMN assigned_tasks.completion_date IS 'Дата виконання задачі';
 COMMENT ON COLUMN assigned_tasks.completion_time_minutes IS 'Час виконання задачі в хвилинах';
 
+
+
+
