@@ -5,13 +5,17 @@ import { getRoleById, getUserWithRole, getUserDepartments } from '../lib/users'
 import { getAssignedTasksByExecutorAndGroup, createAssignedTask, updateAssignedTask, type AssignedTaskWithDetails } from '../lib/assignedTasks'
 import { createTask } from '../lib/tasks'
 import { getTaskCategoriesByProject } from '../lib/tasksCategory'
-import { getAllClients } from '../lib/clients'
+import { getAllClients, getClientWithRelations } from '../lib/clients'
 import { getTeamLeadGroupMembers } from '../lib/users'
 import { supabase } from '../lib/supabase'
 import type { User, Department, Role, TaskCategory, Client } from '../types/database'
-import { formatDate, formatDateToUA } from '../utils/date'
+import { formatDate, formatDateToUA, formatMonthYear } from '../utils/date'
 import { getStatusBadgeClass, getStatusText, getTaskStatus, getTaskTypeText } from '../utils/status'
+import { getActualTaskStatusSync } from '../utils/taskStatus'
+import { useActiveTask } from '../contexts/ActiveTaskContext'
 import { getFullName } from '../utils/user'
+import TaskPlayer from '../components/TaskPlayer'
+import SkeletonLoader from '../components/SkeletonLoader'
 import './AdminPages.css'
 import './AdminDashboard.css'
 
@@ -24,6 +28,7 @@ export default function EmployeeViewPage() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
   const { authUser, user, signOut } = useAuth()
+  const { activeTaskId } = useActiveTask()
   const [employee, setEmployee] = useState<EmployeeWithRole | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -80,6 +85,7 @@ export default function EmployeeViewPage() {
     return result
   }
 
+
   function getAllDatesInMonth(date: Date): Date[] {
     const year = date.getFullYear()
     const month = date.getMonth()
@@ -116,36 +122,85 @@ export default function EmployeeViewPage() {
   }, [user?.role_id])
 
   useEffect(() => {
+    const isMounted = { current: true }
+    
     if (employee?.id && user?.id && isTeamLead) {
-      loadEmployeeTasks()
+      loadEmployeeTasks(isMounted)
+    }
+    
+    return () => {
+      isMounted.current = false
     }
   }, [employee?.id, user?.id, isTeamLead, employeeTasksPeriod])
 
   useEffect(() => {
+    const isMounted = { current: true }
+    
     if (user?.project_id) {
-      loadFilterData()
+      loadFilterData(isMounted)
+    }
+    
+    return () => {
+      isMounted.current = false
     }
   }, [user?.project_id, isTeamLead])
 
-  const loadFilterData = async () => {
+  const loadFilterData = async (isMounted: { current: boolean } = { current: true }) => {
     if (!user?.project_id) return
     try {
       const [categories, allClients] = await Promise.all([
         getTaskCategoriesByProject(user.project_id),
         getAllClients(user.project_id)
       ])
+      
+      // Перевіряємо монтування перед встановленням стану
+      if (!isMounted.current) return
+      
       setTaskCategories(categories)
       
       // Фільтруємо клієнтів по відділам тім ліда
       if (isTeamLead && user.id) {
         const teamLeadDepts = await getUserDepartments(user.id)
-        const deptIds = teamLeadDepts.map(d => d.id)
-        const filteredClients = allClients.filter(client => {
-          // Тут потрібно перевірити, чи клієнт має відділи, які належать тім ліду
-          // Для спрощення показуємо всіх клієнтів
-          return true
-        })
-        setClients(filteredClients)
+        
+        // Знову перевіряємо монтування після асинхронної операції
+        if (!isMounted.current) return
+        
+        if (teamLeadDepts.length > 0) {
+          const teamLeadDeptIds = teamLeadDepts.map(d => d.id)
+          
+          // Завантажуємо відділи для кожного клієнта та фільтруємо
+          const clientsWithDepartments = await Promise.all(
+            allClients.map(async (client) => {
+              try {
+                const clientWithRelations = await getClientWithRelations(client.id)
+                return {
+                  ...client,
+                  departments: clientWithRelations?.departments || []
+                }
+              } catch (err) {
+                console.warn(`Помилка завантаження відділів для клієнта ${client.id}:`, err)
+                return {
+                  ...client,
+                  departments: []
+                }
+              }
+            })
+          )
+          
+          // Перевіряємо монтування після всіх асинхронних операцій
+          if (!isMounted.current) return
+          
+          // Фільтруємо клієнтів за відділами тім ліда
+          const filteredClients = clientsWithDepartments.filter(client => {
+            const clientDeptIds = client.departments?.map((dept: any) => dept.id) || []
+            return clientDeptIds.some((deptId: number) => teamLeadDeptIds.includes(deptId))
+          }).map(({ departments, ...client }) => client) // Видаляємо departments з результату
+          
+          setClients(filteredClients)
+        } else {
+          // Якщо тім лід не має відділів, показуємо порожній список
+          setClients([])
+        }
       } else {
         setClients(allClients)
       }
@@ -173,12 +228,18 @@ export default function EmployeeViewPage() {
     }
   }
 
-  const loadEmployeeTasks = async () => {
+  const loadEmployeeTasks = async (isMounted: { current: boolean } = { current: true }) => {
     if (!employee?.id || !user?.id) return
 
-    setEmployeeTasksLoading(true)
+    if (isMounted.current) {
+      setEmployeeTasksLoading(true)
+    }
+    
     try {
       const tasks = await getAssignedTasksByExecutorAndGroup(employee.id, user.id)
+      
+      // Перевіряємо монтування перед встановленням стану
+      if (!isMounted.current) return
       
       // Сортуємо по датах від меншої до більшої
       tasks.sort((a, b) => {
@@ -190,9 +251,13 @@ export default function EmployeeViewPage() {
       setEmployeeTasks(tasks)
     } catch (err) {
       console.error('Error loading employee tasks:', err)
-      setError('Не вдалося завантажити задачі співробітника')
+      if (isMounted.current) {
+        setError('Не вдалося завантажити задачі співробітника')
+      }
     } finally {
-      setEmployeeTasksLoading(false)
+      if (isMounted.current) {
+        setEmployeeTasksLoading(false)
+      }
     }
   }
 
@@ -412,7 +477,9 @@ export default function EmployeeViewPage() {
   if (loading) {
     return (
       <div className="admin-page">
-        <div className="loading">Завантаження...</div>
+        <div style={{ padding: '24px' }}>
+          <SkeletonLoader type="card" />
+        </div>
       </div>
     )
   }
@@ -472,14 +539,102 @@ export default function EmployeeViewPage() {
               </button>
             </div>
             <nav className="sidebar-nav-menu">
-              <button className="sidebar-nav-item" onClick={() => { navigate('/dashboard'); setSidebarOpen(false); }}>
+              <button 
+                className="sidebar-nav-item"
+                onClick={() => { 
+                  navigate('/dashboard?tab=employees'); 
+                  setSidebarOpen(false); 
+                }}
+              >
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
+                  <circle cx="9" cy="7" r="4"></circle>
+                  <path d="M23 21v-2a4 4 0 0 0-3-3.87"></path>
+                  <path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
+                </svg>
+                <span>Співробітники</span>
+              </button>
+              <button 
+                className="sidebar-nav-item"
+                onClick={() => { 
+                  navigate('/dashboard?tab=clients'); 
+                  setSidebarOpen(false); 
+                }}
+              >
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
                   <circle cx="8.5" cy="7" r="4"></circle>
                   <path d="M20 8v6"></path>
                   <path d="M23 11h-6"></path>
                 </svg>
-                <span>Співробітники</span>
+                <span>Клієнти</span>
+              </button>
+              <button
+                className="sidebar-nav-item"
+                onClick={() => { 
+                  navigate('/dashboard?tab=calendar'); 
+                  setSidebarOpen(false); 
+                }}
+                style={{ display: isTeamLead ? 'none' : 'flex' }}
+              >
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect>
+                  <line x1="16" y1="2" x2="16" y2="6"></line>
+                  <line x1="8" y1="2" x2="8" y2="6"></line>
+                  <line x1="3" y1="10" x2="21" y2="10"></line>
+                </svg>
+                <span>Календар</span>
+              </button>
+              {isTeamLead && (
+                <>
+                  <button
+                    className="sidebar-nav-item"
+                    onClick={() => { 
+                      navigate('/dashboard?tab=calendar'); 
+                      setSidebarOpen(false); 
+                    }}
+                  >
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect>
+                      <line x1="16" y1="2" x2="16" y2="6"></line>
+                      <line x1="8" y1="2" x2="8" y2="6"></line>
+                      <line x1="3" y1="10" x2="21" y2="10"></line>
+                    </svg>
+                    <span>Планові задачі</span>
+                  </button>
+                  <button
+                    className="sidebar-nav-item"
+                    onClick={() => { 
+                      navigate('/dashboard?tab=task-calendar'); 
+                      setSidebarOpen(false); 
+                    }}
+                  >
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect>
+                      <line x1="16" y1="2" x2="16" y2="6"></line>
+                      <line x1="8" y1="2" x2="8" y2="6"></line>
+                      <line x1="3" y1="10" x2="21" y2="10"></line>
+                      <path d="M8 14h.01M12 14h.01M16 14h.01M8 18h.01M12 18h.01M16 18h.01"></path>
+                    </svg>
+                    <span>Календар задач</span>
+                  </button>
+                </>
+              )}
+              <button
+                className="sidebar-nav-item"
+                onClick={() => { 
+                  navigate('/dashboard?tab=my-calendar'); 
+                  setSidebarOpen(false); 
+                }}
+              >
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect>
+                  <line x1="16" y1="2" x2="16" y2="6"></line>
+                  <line x1="8" y1="2" x2="8" y2="6"></line>
+                  <line x1="3" y1="10" x2="21" y2="10"></line>
+                  <path d="M8 14h.01M12 14h.01M16 14h.01M8 18h.01M12 18h.01M16 18h.01"></path>
+                </svg>
+                <span>Мій календар</span>
               </button>
             </nav>
           </div>
@@ -496,7 +651,7 @@ export default function EmployeeViewPage() {
               <h2>Карточка співробітника: {getFullName(employee)}</h2>
             </div>
             <div className="project-header-right">
-              <button className="btn-back" onClick={() => navigate('/dashboard')}>
+              <button className="btn-back" onClick={() => navigate('/dashboard?tab=employees')}>
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M19 12H5M12 19l-7-7 7-7"/>
                 </svg>
@@ -605,6 +760,17 @@ export default function EmployeeViewPage() {
                   >
                     ← Попередній
                   </button>
+                  <div style={{ 
+                    padding: '6px 16px',
+                    fontSize: '16px',
+                    fontWeight: '600',
+                    color: '#2d3748'
+                  }}>
+                    {employeeTasksPeriod.type === 'month' 
+                      ? formatMonthYear(employeeTasksPeriod.startDate)
+                      : `${formatDateToUA(employeeTasksPeriod.startDate.toISOString().split('T')[0])} - ${formatDateToUA(addDays(employeeTasksPeriod.startDate, 6).toISOString().split('T')[0])}`
+                    }
+                  </div>
                   <button
                     onClick={() => {
                       const newStartDate = employeeTasksPeriod.type === 'week' 
@@ -627,7 +793,13 @@ export default function EmployeeViewPage() {
                   <button
                     onClick={() => {
                       const newType = employeeTasksPeriod.type === 'week' ? 'month' : 'week'
-                      const newStartDate = newType === 'week' ? getCurrentWeekMonday() : new Date()
+                      let newStartDate: Date
+                      if (newType === 'week') {
+                        newStartDate = getCurrentWeekMonday()
+                      } else {
+                        const today = new Date()
+                        newStartDate = new Date(today.getFullYear(), today.getMonth(), 1)
+                      }
                       setEmployeeTasksPeriod({ type: newType, startDate: newStartDate })
                       setEmployeeTasksPage(0)
                     }}
@@ -660,7 +832,8 @@ export default function EmployeeViewPage() {
                     <>
                       <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', marginBottom: '16px' }}>
                         {paginatedTasks.map(task => {
-                          const status = getTaskStatus(task)
+                          // Використовуємо уніфіковану логіку визначення статусу
+                          const status = getActualTaskStatusSync(task, activeTaskId)
                           const taskDate = task.task?.planned_date 
                             ? formatDateToUA(task.task.planned_date.split('T')[0])
                             : 'Не вказано'
@@ -944,6 +1117,9 @@ export default function EmployeeViewPage() {
           </div>
         )
       })()}
+      
+      {/* Плеер задачі - відображається при активній задачі */}
+      <TaskPlayer />
     </div>
   )
 }

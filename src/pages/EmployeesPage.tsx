@@ -1,8 +1,10 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { useQueryClient } from '@tanstack/react-query'
+import { List } from 'react-window'
 import { useAuth } from '../contexts/AuthContext'
+import { useUsersByProject, useUsersByProjectCount } from '../hooks/useUsers'
 import { 
-  getUsersByProject, 
   getDepartmentsByProject, 
   createDepartment,
   updateDepartment,
@@ -22,6 +24,8 @@ import type { User, Department, Role } from '../types/database'
 import { formatDate } from '../utils/date'
 import { getStatusBadgeClass, getStatusText } from '../utils/status'
 import { getFullName } from '../utils/user'
+import TaskPlayer from '../components/TaskPlayer'
+import SkeletonLoader from '../components/SkeletonLoader'
 import './AdminPages.css'
 import './ManagerDashboard.css'
 
@@ -32,9 +36,13 @@ interface EmployeeWithRole extends User {
 export default function EmployeesPage() {
   const { user } = useAuth()
   const navigate = useNavigate()
+  const queryClient = useQueryClient()
   const [employees, setEmployees] = useState<EmployeeWithRole[]>([])
   const [groupMembers, setGroupMembers] = useState<EmployeeWithRole[]>([])
   const [employeesWithoutGroup, setEmployeesWithoutGroup] = useState<EmployeeWithRole[]>([])
+  const [employeesReady, setEmployeesReady] = useState(false) // Стан готовності співробітників
+  const [groupMembersReady, setGroupMembersReady] = useState(false) // Стан готовності працівників групи (для тім ліда)
+  const [employeesWithoutGroupReady, setEmployeesWithoutGroupReady] = useState(false) // Стан готовності працівників без групи (для тім ліда)
   const [departments, setDepartments] = useState<Department[]>([])
   const [availableRoles, setAvailableRoles] = useState<Role[]>([])
   const [loading, setLoading] = useState(true)
@@ -52,6 +60,15 @@ export default function EmployeesPage() {
   const [editingDepartmentName, setEditingDepartmentName] = useState<string>('')
   const [error, setError] = useState<string | null>(null)
   const [success, setSuccess] = useState<string | null>(null)
+  
+  // Пагінація для користувачів (тільки для керівника виробництва)
+  const USERS_PER_PAGE = 25
+  const [usersCurrentPage, setUsersCurrentPage] = useState(0)
+  
+  // Використовуємо React Query хуки для кешування користувачів (тільки для керівника виробництва)
+  const offset = usersCurrentPage * USERS_PER_PAGE
+  const { data: usersData = [], isLoading: usersLoading } = useUsersByProject(user?.project_id || 0, USERS_PER_PAGE, offset)
+  const { data: totalUsers = 0 } = useUsersByProjectCount(user?.project_id || 0)
 
   const [departmentForm, setDepartmentForm] = useState({
     department_name: ''
@@ -86,12 +103,67 @@ export default function EmployeesPage() {
         }
         
         // Після визначення ролі завантажуємо дані, передаючи значення ролі безпосередньо
-        await loadData(isTeamLeadRole)
+        // Для керівника виробництва не викликаємо loadData тут, оскільки дані завантажуються через React Query
+        if (isTeamLeadRole) {
+          await loadData(isTeamLeadRole)
+        } else {
+          // Для керівника виробництва встановлюємо loading, поки дані не будуть оброблені в useEffect
+          setLoading(true)
+        }
         await loadAvailableRoles(isTeamLeadRole)
       }
       initializeData()
     }
   }, [user?.project_id, user?.role_id])
+  
+  // Синхронізуємо дані з React Query хуків для керівника виробництва
+  useEffect(() => {
+    // Не обробляємо для тім ліда - для нього дані завантажуються в loadData
+    if (isTeamLead) return
+    
+    if (usersLoading) {
+      // Під час завантаження показуємо skeleton loader
+      setLoading(true)
+      setEmployeesReady(false)
+      setEmployees([]) // Очищаємо дані під час завантаження
+      return
+    }
+    
+    if (!usersLoading && usersData.length >= 0 && user?.project_id && user?.id) {
+      const processUsers = async () => {
+        try {
+          // Скидаємо стан готовності та очищаємо дані перед обробкою
+          setEmployeesReady(false)
+          setEmployees([]) // Очищаємо дані
+          setLoading(true) // Встановлюємо loading перед обробкою
+          
+          // Фільтруємо поточного користувача (використовуємо дані з кешу)
+          const filteredEmployees = usersData.filter(emp => emp.id !== user.id)
+          
+          // Завантажуємо ролі для кожного співробітника
+          const employeesWithRoles = await Promise.all(
+            filteredEmployees.map(async (emp) => {
+              const userWithRole = await getUserWithRole(emp.id)
+              return userWithRole ? { ...emp, role: userWithRole.role } : emp
+            })
+          )
+          
+          // Встановлюємо дані та готовність одночасно
+          setEmployees(employeesWithRoles)
+          setEmployeesReady(true) // Відмічаємо, що співробітники готові до показу
+          setLoading(false)
+        } catch (err) {
+          console.error('Error processing users:', err)
+          setError('Помилка обробки даних користувачів')
+          setEmployees([]) // Очищаємо дані при помилці
+          setEmployeesReady(true) // Навіть при помилці встановлюємо готовність
+          setLoading(false)
+        }
+      }
+      
+      processUsers()
+    }
+  }, [usersData, usersLoading, isTeamLead, user?.project_id, user?.id])
 
   const loadAvailableRoles = async (isTeamLeadRole?: boolean) => {
     const allRoles = await getAllRoles()
@@ -113,67 +185,63 @@ export default function EmployeesPage() {
   const loadData = async (isTeamLeadRole?: boolean) => {
     if (!user?.project_id || !user?.id) return
 
+    const isTeamLeadValue = isTeamLeadRole !== undefined ? isTeamLeadRole : isTeamLead
+    
+    // Для керівника виробництва не виконуємо loadData - дані завантажуються через React Query в useEffect
+    if (!isTeamLeadValue) {
+      return
+    }
+
     setLoading(true)
+    // Скидаємо стани готовності та очищаємо дані перед завантаженням
+    setGroupMembersReady(false)
+    setEmployeesWithoutGroupReady(false)
+    setGroupMembers([]) // Очищаємо дані
+    setEmployeesWithoutGroup([]) // Очищаємо дані
+    
     try {
-      const isTeamLeadValue = isTeamLeadRole !== undefined ? isTeamLeadRole : isTeamLead
+      // Для тім ліда спочатку отримуємо його відділи
+      const teamLeadDepts = await getUserDepartments(user.id)
+      const teamLeadDeptIds = teamLeadDepts.map(dept => dept.id)
       
-      if (isTeamLeadValue) {
-        // Для тім ліда спочатку отримуємо його відділи
-        const teamLeadDepts = await getUserDepartments(user.id)
-        const teamLeadDeptIds = teamLeadDepts.map(dept => dept.id)
-        
-        // Завантажуємо своїх працівників та працівників без групи з фільтрацією за відділами
-        // Якщо у тім ліда є відділи, передаємо їх для фільтрації, інакше передаємо undefined
-        const teamLeadData = await getTeamLeadEmployees(
-          user.id, 
-          user.project_id, 
-          teamLeadDeptIds.length > 0 ? teamLeadDeptIds : undefined
-        )
-        
-        // Завантажуємо ролі для співробітників групи
-        const groupMembersWithRoles = await Promise.all(
-          teamLeadData.groupMembers.map(async (emp) => {
-            const userWithRole = await getUserWithRole(emp.id)
-            return userWithRole ? { ...emp, role: userWithRole.role } : emp
-          })
-        )
-        
-        // Завантажуємо ролі для співробітників без групи
-        const withoutGroupWithRoles = await Promise.all(
-          teamLeadData.withoutGroup.map(async (emp) => {
-            const userWithRole = await getUserWithRole(emp.id)
-            return userWithRole ? { ...emp, role: userWithRole.role } : emp
-          })
-        )
-        
-        setGroupMembers(groupMembersWithRoles)
-        setEmployeesWithoutGroup(withoutGroupWithRoles)
-        setTeamLeadDepartments(teamLeadDepts)
-        setDepartments(teamLeadDepts) // Для тім ліда використовуємо тільки його відділи
-      } else {
-        // Для керівника виробництва - стандартна логіка
-        const [employeesData, departmentsData] = await Promise.all([
-          getUsersByProject(user.project_id),
-          getDepartmentsByProject(user.project_id)
-        ])
-        
-        // Фільтруємо поточного користувача
-        const filteredEmployees = employeesData.filter(emp => emp.id !== user.id)
-        
-        // Завантажуємо ролі для кожного співробітника
-        const employeesWithRoles = await Promise.all(
-          filteredEmployees.map(async (emp) => {
-            const userWithRole = await getUserWithRole(emp.id)
-            return userWithRole ? { ...emp, role: userWithRole.role } : emp
-          })
-        )
-        
-        setEmployees(employeesWithRoles)
-        setDepartments(departmentsData)
-      }
+      // Завантажуємо своїх працівників та працівників без групи з фільтрацією за відділами
+      // Якщо у тім ліда є відділи, передаємо їх для фільтрації, інакше передаємо undefined
+      const teamLeadData = await getTeamLeadEmployees(
+        user.id, 
+        user.project_id, 
+        teamLeadDeptIds.length > 0 ? teamLeadDeptIds : undefined
+      )
+      
+      // Завантажуємо ролі для співробітників групи
+      const groupMembersWithRoles = await Promise.all(
+        teamLeadData.groupMembers.map(async (emp) => {
+          const userWithRole = await getUserWithRole(emp.id)
+          return userWithRole ? { ...emp, role: userWithRole.role } : emp
+        })
+      )
+      
+      // Завантажуємо ролі для співробітників без групи
+      const withoutGroupWithRoles = await Promise.all(
+        teamLeadData.withoutGroup.map(async (emp) => {
+          const userWithRole = await getUserWithRole(emp.id)
+          return userWithRole ? { ...emp, role: userWithRole.role } : emp
+        })
+      )
+      
+      // Встановлюємо дані та готовність одночасно
+      setGroupMembers(groupMembersWithRoles)
+      setEmployeesWithoutGroup(withoutGroupWithRoles)
+      setTeamLeadDepartments(teamLeadDepts)
+      setDepartments(teamLeadDepts) // Для тім ліда використовуємо тільки його відділи
+      setGroupMembersReady(true) // Відмічаємо, що працівники групи готові
+      setEmployeesWithoutGroupReady(true) // Відмічаємо, що працівники без групи готові
     } catch (err) {
       console.error('Error loading data:', err)
       setError('Не вдалося завантажити дані')
+      // Навіть при помилці встановлюємо готовність, щоб показати порожній список
+      setEmployeesReady(true)
+      setGroupMembersReady(true)
+      setEmployeesWithoutGroupReady(true)
     } finally {
       setLoading(false)
     }
@@ -303,6 +371,8 @@ export default function EmployeesPage() {
 
         resetEmployeeForm()
         setShowEmployeeModal(false)
+        // Інвалідуємо кеш користувачів
+        queryClient.invalidateQueries({ queryKey: ['users'] })
         await loadData()
       } else {
         // Створення нового співробітника
@@ -391,6 +461,8 @@ export default function EmployeesPage() {
 
         resetEmployeeForm()
         setShowEmployeeModal(false)
+        // Інвалідуємо кеш користувачів
+        queryClient.invalidateQueries({ queryKey: ['users'] })
         await loadData()
       }
     } catch (err: any) {
@@ -539,7 +611,9 @@ export default function EmployeesPage() {
   if (loading) {
     return (
       <div className="admin-page">
-        <div className="loading">Завантаження...</div>
+        <div style={{ padding: '24px' }}>
+          <SkeletonLoader type="table" rows={8} />
+        </div>
       </div>
     )
   }
@@ -623,7 +697,11 @@ export default function EmployeesPage() {
         </div>
       )}
 
-      {isTeamLead ? (
+      {loading || (!isTeamLead && !employeesReady) || (isTeamLead && (!groupMembersReady || !employeesWithoutGroupReady)) ? (
+        <div className="table-container">
+          <SkeletonLoader type="table" rows={5} />
+        </div>
+      ) : isTeamLead ? (
         <>
           {/* Секція для тім ліда: Мої працівники */}
           <div style={{ marginBottom: '32px' }}>
@@ -631,44 +709,50 @@ export default function EmployeesPage() {
               Мої працівники
             </h3>
             <div className="table-container">
-              <table className="admin-table">
-                <thead>
-                  <tr>
-                    <th>ID</th>
-                    <th>ПІБ</th>
-                    <th>Email</th>
-                    <th>Телефон</th>
-                    <th>Роль</th>
-                    <th>Відділи</th>
-                    <th>Статус</th>
-                    <th>Дата реєстрації</th>
-                    <th>Дії</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {groupMembers.length === 0 ? (
+              {groupMembers.length === 0 ? (
+                <div style={{ textAlign: 'center', padding: '40px' }}>
+                  Немає працівників у вашій групі
+                </div>
+              ) : (
+                <table className="admin-table">
+                  <thead>
                     <tr>
-                      <td colSpan={9} style={{ textAlign: 'center', padding: '40px' }}>
-                        Немає працівників у вашій групі
-                      </td>
+                      <th>ID</th>
+                      <th>ПІБ</th>
+                      <th>Email</th>
+                      <th>Телефон</th>
+                      <th>Роль</th>
+                      <th>Відділи</th>
+                      <th>Статус</th>
+                      <th>Дата реєстрації</th>
+                      <th>Дії</th>
                     </tr>
-                  ) : (
-                    groupMembers.map((employee) => (
-                      <EmployeeRow 
-                        key={employee.id} 
-                        employee={employee} 
-                        departments={departments}
-                        getFullName={getFullName}
-                        formatDate={formatDate}
-                        onView={handleViewEmployee}
-                        onEdit={handleEditEmployee}
-                        onToggleStatus={handleToggleStatusClick}
-                        currentUserId={user?.id}
-                      />
-                    ))
-                  )}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody>
+                    {groupMembers.length === 0 ? (
+                      <tr>
+                        <td colSpan={9} style={{ textAlign: 'center', padding: '40px' }}>
+                          Немає працівників у вашій групі
+                        </td>
+                      </tr>
+                    ) : (
+                      groupMembers.map((employee) => (
+                        <EmployeeRow 
+                          key={employee.id} 
+                          employee={employee} 
+                          departments={departments}
+                          getFullName={getFullName}
+                          formatDate={formatDate}
+                          onView={handleViewEmployee}
+                          onEdit={handleEditEmployee}
+                          onToggleStatus={handleToggleStatusClick}
+                          currentUserId={user?.id}
+                        />
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              )}
             </div>
           </div>
 
@@ -678,29 +762,27 @@ export default function EmployeesPage() {
               Працівники без групи
             </h3>
             <div className="table-container">
-              <table className="admin-table">
-                <thead>
-                  <tr>
-                    <th>ID</th>
-                    <th>ПІБ</th>
-                    <th>Email</th>
-                    <th>Телефон</th>
-                    <th>Роль</th>
-                    <th>Відділи</th>
-                    <th>Статус</th>
-                    <th>Дата реєстрації</th>
-                    <th>Дії</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {employeesWithoutGroup.length === 0 ? (
+              {employeesWithoutGroup.length === 0 ? (
+                <div style={{ textAlign: 'center', padding: '40px' }}>
+                  Немає працівників без групи
+                </div>
+              ) : (
+                <table className="admin-table">
+                  <thead>
                     <tr>
-                      <td colSpan={9} style={{ textAlign: 'center', padding: '40px' }}>
-                        Немає працівників без групи
-                      </td>
+                      <th>ID</th>
+                      <th>ПІБ</th>
+                      <th>Email</th>
+                      <th>Телефон</th>
+                      <th>Роль</th>
+                      <th>Відділи</th>
+                      <th>Статус</th>
+                      <th>Дата реєстрації</th>
+                      <th>Дії</th>
                     </tr>
-                  ) : (
-                    employeesWithoutGroup.map((employee) => (
+                  </thead>
+                  <tbody>
+                    {employeesWithoutGroup.map((employee) => (
                       <EmployeeRow 
                         key={employee.id} 
                         employee={employee} 
@@ -714,38 +796,84 @@ export default function EmployeesPage() {
                         canEdit={false}
                         canToggleStatus={false}
                       />
-                    ))
-                  )}
-                </tbody>
-              </table>
+                    ))}
+                  </tbody>
+                </table>
+              )}
             </div>
           </div>
         </>
       ) : (
         <div className="table-container">
-          <table className="admin-table">
-            <thead>
-              <tr>
-                <th>ID</th>
-                <th>ПІБ</th>
-                <th>Email</th>
-                <th>Телефон</th>
-                <th>Роль</th>
-                <th>Відділи</th>
-                <th>Статус</th>
-                <th>Дата реєстрації</th>
-                <th>Дії</th>
-              </tr>
-            </thead>
-            <tbody>
-              {employees.length === 0 ? (
+          {employees.length === 0 ? (
+            <div style={{ textAlign: 'center', padding: '40px' }}>
+              Немає співробітників
+            </div>
+          ) : employees.length > 50 ? (
+            // Використовуємо віртуалізацію для великих списків (>50 записів)
+            <div style={{ width: '100%' }}>
+              {/* Заголовок таблиці */}
+              <div style={{ 
+                display: 'grid', 
+                gridTemplateColumns: '60px 1.5fr 1.5fr 1.2fr 1fr 1.5fr 1fr 1.2fr 120px',
+                background: '#f7fafc', 
+                fontWeight: '600',
+                borderBottom: '2px solid #e2e8f0',
+                position: 'sticky',
+                top: 0,
+                zIndex: 10
+              }}>
+                <div style={{ padding: '12px' }}>ID</div>
+                <div style={{ padding: '12px' }}>ПІБ</div>
+                <div style={{ padding: '12px' }}>Email</div>
+                <div style={{ padding: '12px' }}>Телефон</div>
+                <div style={{ padding: '12px' }}>Роль</div>
+                <div style={{ padding: '12px' }}>Відділи</div>
+                <div style={{ padding: '12px' }}>Статус</div>
+                <div style={{ padding: '12px' }}>Дата реєстрації</div>
+                <div style={{ padding: '12px' }}>Дії</div>
+              </div>
+              {/* Віртуалізоване тіло таблиці */}
+              <List
+                height={Math.min(600, employees.length * 60)} // Максимальна висота 600px або висота всіх рядків
+                itemCount={employees.length}
+                itemSize={60} // Висота одного рядка
+                width="100%"
+              >
+                {({ index, style }: { index: number; style: React.CSSProperties }) => (
+                  <div style={style}>
+                    <VirtualizedEmployeeRow
+                      employee={employees[index]}
+                      departments={departments}
+                      getFullName={getFullName}
+                      formatDate={formatDate}
+                      onView={handleViewEmployee}
+                      onEdit={handleEditEmployee}
+                      onToggleStatus={handleToggleStatusClick}
+                      currentUserId={user?.id}
+                    />
+                  </div>
+                )}
+              </List>
+            </div>
+          ) : (
+            // Для малих списків використовуємо звичайну таблицю
+            <table className="admin-table">
+              <thead>
                 <tr>
-                  <td colSpan={9} style={{ textAlign: 'center', padding: '40px' }}>
-                    Немає співробітників
-                  </td>
+                  <th>ID</th>
+                  <th>ПІБ</th>
+                  <th>Email</th>
+                  <th>Телефон</th>
+                  <th>Роль</th>
+                  <th>Відділи</th>
+                  <th>Статус</th>
+                  <th>Дата реєстрації</th>
+                  <th>Дії</th>
                 </tr>
-              ) : (
-                employees.map((employee) => (
+              </thead>
+              <tbody>
+                {employees.map((employee) => (
                   <EmployeeRow 
                     key={employee.id} 
                     employee={employee} 
@@ -757,10 +885,81 @@ export default function EmployeesPage() {
                     onToggleStatus={handleToggleStatusClick}
                     currentUserId={user?.id}
                   />
-                ))
-              )}
-            </tbody>
-          </table>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      )}
+
+      {/* Пагінація співробітників (тільки для керівника виробництва) */}
+      {!isTeamLead && totalUsers > USERS_PER_PAGE && (
+        <div style={{ 
+          display: 'flex', 
+          justifyContent: 'center', 
+          alignItems: 'center', 
+          gap: '12px', 
+          padding: '20px',
+          marginTop: '20px',
+          background: '#ffffff',
+          borderRadius: '8px',
+          border: '1px solid #e2e8f0'
+        }}>
+          <button
+            onClick={() => {
+              if (usersCurrentPage > 0) {
+                setUsersCurrentPage(usersCurrentPage - 1)
+              }
+            }}
+            disabled={usersCurrentPage === 0}
+            style={{
+              padding: '8px 16px',
+              background: usersCurrentPage === 0 ? '#f7fafc' : '#4299e1',
+              color: usersCurrentPage === 0 ? '#a0aec0' : '#ffffff',
+              border: 'none',
+              borderRadius: '6px',
+              cursor: usersCurrentPage === 0 ? 'not-allowed' : 'pointer',
+              fontSize: '14px',
+              fontWeight: '500'
+            }}
+          >
+            ← Попередня
+          </button>
+          
+          <span style={{ 
+            fontSize: '14px', 
+            color: '#4a5568',
+            minWidth: '120px',
+            textAlign: 'center'
+          }}>
+            Сторінка {usersCurrentPage + 1} з {Math.ceil(totalUsers / USERS_PER_PAGE)}
+            <br />
+            <small style={{ color: '#718096' }}>
+              Показано {usersCurrentPage * USERS_PER_PAGE + 1}-{Math.min((usersCurrentPage + 1) * USERS_PER_PAGE, totalUsers)} з {totalUsers} співробітників
+            </small>
+          </span>
+          
+          <button
+            onClick={() => {
+              const totalPages = Math.ceil(totalUsers / USERS_PER_PAGE)
+              if (usersCurrentPage < totalPages - 1) {
+                setUsersCurrentPage(usersCurrentPage + 1)
+              }
+            }}
+            disabled={usersCurrentPage >= Math.ceil(totalUsers / USERS_PER_PAGE) - 1}
+            style={{
+              padding: '8px 16px',
+              background: usersCurrentPage >= Math.ceil(totalUsers / USERS_PER_PAGE) - 1 ? '#f7fafc' : '#4299e1',
+              color: usersCurrentPage >= Math.ceil(totalUsers / USERS_PER_PAGE) - 1 ? '#a0aec0' : '#ffffff',
+              border: 'none',
+              borderRadius: '6px',
+              cursor: usersCurrentPage >= Math.ceil(totalUsers / USERS_PER_PAGE) - 1 ? 'not-allowed' : 'pointer',
+              fontSize: '14px',
+              fontWeight: '500'
+            }}
+          >
+            Наступна →
+          </button>
         </div>
       )}
 
@@ -1228,6 +1427,137 @@ export default function EmployeesPage() {
           </div>
         </div>
       )}
+      
+      {/* Плеер задачі - відображається при активній задачі */}
+      <TaskPlayer />
+    </div>
+  )
+}
+
+// Компонент для віртуалізованого рядка співробітника
+function VirtualizedEmployeeRow({
+  employee,
+  departments,
+  getFullName,
+  formatDate,
+  onView,
+  onEdit,
+  onToggleStatus,
+  currentUserId
+}: {
+  employee: EmployeeWithRole
+  departments: Department[]
+  getFullName: (user: User) => string
+  formatDate: (date: string) => string
+  onView: (employee: EmployeeWithRole) => void
+  onEdit: (employee: EmployeeWithRole) => void
+  onToggleStatus: (employee: EmployeeWithRole) => void
+  currentUserId?: number
+}) {
+  const [employeeDepartments, setEmployeeDepartments] = useState<Department[]>([])
+
+  useEffect(() => {
+    loadEmployeeDepartments()
+  }, [employee.id])
+
+  const loadEmployeeDepartments = async () => {
+    const depts = await getUserDepartments(employee.id)
+    setEmployeeDepartments(depts)
+  }
+
+  return (
+    <div style={{ 
+      display: 'grid', 
+      gridTemplateColumns: '60px 1.5fr 1.5fr 1.2fr 1fr 1.5fr 1fr 1.2fr 120px',
+      borderBottom: '1px solid #e2e8f0',
+      background: '#ffffff',
+      alignItems: 'center'
+    }}>
+      <div style={{ padding: '12px' }}>{employee.id}</div>
+      <div style={{ padding: '12px' }}>{getFullName(employee)}</div>
+      <div style={{ padding: '12px' }}>{employee.email || '-'}</div>
+      <div style={{ padding: '12px' }}>{employee.phone || '-'}</div>
+      <div style={{ padding: '12px' }}>
+        {employee.role ? (
+          <span 
+            className="status-badge"
+            style={{ 
+              background: '#f0f4ff', 
+              color: '#4c51bf',
+              fontSize: '12px',
+              padding: '6px 12px',
+              fontWeight: 500
+            }}
+          >
+            {employee.role.role_name}
+          </span>
+        ) : (
+          '-'
+        )}
+      </div>
+      <div style={{ padding: '12px' }}>
+        {employeeDepartments.length > 0 ? (
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+            {employeeDepartments.map((dept: Department) => (
+              <span 
+                key={dept.id}
+                className="status-badge"
+                style={{ 
+                  background: '#e6f2ff', 
+                  color: '#2c5282',
+                  fontSize: '11px',
+                  padding: '4px 10px'
+                }}
+              >
+                {dept.department_name}
+              </span>
+            ))}
+          </div>
+        ) : (
+          '-'
+        )}
+      </div>
+      <div style={{ padding: '12px' }}>
+        <span className={`status-badge ${getStatusBadgeClass(employee.status)}`}>
+          {getStatusText(employee.status)}
+        </span>
+      </div>
+      <div style={{ padding: '12px' }}>{formatDate(employee.date_added)}</div>
+      <div style={{ padding: '12px' }}>
+        <div className="action-buttons">
+          <button
+            className="btn-action btn-edit"
+            onClick={() => onEdit(employee)}
+            title="Редагувати"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path>
+              <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path>
+            </svg>
+          </button>
+          <button
+            className={`btn-action btn-toggle ${employee.status === 'active' ? 'inactive' : 'active'} ${employee.id === currentUserId ? 'disabled' : ''}`}
+            onClick={() => onToggleStatus(employee)}
+            disabled={employee.id === currentUserId}
+            title={employee.id === currentUserId ? 'Ви не можете деактивувати себе' : (employee.status === 'active' ? 'Деактивувати' : 'Активувати')}
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M18.36 6.64a9 9 0 1 1-12.73 0"></path>
+              <line x1="12" y1="2" x2="12" y2="12"></line>
+            </svg>
+          </button>
+          <button
+            className="btn-action btn-view"
+            onClick={() => onView(employee)}
+            title="Перегляд"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
+              <circle cx="12" cy="12" r="3"></circle>
+            </svg>
+          </button>
+        </div>
+      </div>
     </div>
   )
 }

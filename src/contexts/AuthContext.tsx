@@ -31,29 +31,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           console.warn('Користувач не знайдений в таблиці users. Створіть запис для auth_user_id:', authUserId)
         } else {
           console.error('Error loading user:', error)
-          // Логуємо детальну інформацію про помилку мережі
-          if (error.message?.includes('Failed to fetch') || error.code === -102 || error.message?.includes('network')) {
-            console.error('❌ Помилка підключення до Supabase при завантаженні користувача:', {
-              message: error.message,
-              code: error.code,
-              hint: 'Перевірте підключення до інтернету та налаштування Supabase URL'
-            })
-          }
         }
         setUser(null)
       } else {
         setUser(data)
       }
-    } catch (err: any) {
+    } catch (err) {
       console.error('Error in loadUser:', err)
-      // Логуємо детальну інформацію про помилку мережі
-      if (err?.message?.includes('Failed to fetch') || err?.code === -102 || err?.message?.includes('network')) {
-        console.error('❌ Помилка підключення до Supabase при завантаженні користувача:', {
-          message: err?.message,
-          code: err?.code,
-          hint: 'Перевірте підключення до інтернету та налаштування Supabase URL'
-        })
-      }
       setUser(null)
     } finally {
       setLoading(false)
@@ -63,41 +47,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     let mounted = true
 
-    // Перевіряємо флаг виходу
-    const isLoggingOut = localStorage.getItem('isLoggingOut') === 'true'
-    if (isLoggingOut) {
-      // Якщо це вихід, очищаємо стан і не завантажуємо сесію
-      setUser(null)
-      setAuthUser(null)
-      setLoading(false)
-      localStorage.removeItem('isLoggingOut')
-      return
-    }
-
     supabase.auth.getSession()
       .then(({ data: { session }, error }) => {
         if (!mounted) return
         
-        // Перевіряємо флаг виходу знову (на випадок якщо він встановився під час завантаження)
-        const isLoggingOutNow = localStorage.getItem('isLoggingOut') === 'true'
-        if (isLoggingOutNow) {
-          setUser(null)
-          setAuthUser(null)
-          setLoading(false)
-          localStorage.removeItem('isLoggingOut')
-          return
-        }
-        
         if (error) {
           console.error('Error getting session:', error)
-          // Логуємо детальну інформацію про помилку мережі
-          if (error.message?.includes('Failed to fetch') || error.code === -102 || error.message?.includes('network')) {
-            console.error('❌ Помилка підключення до Supabase:', {
-              message: error.message,
-              code: error.code,
-              hint: 'Перевірте підключення до інтернету та налаштування Supabase URL'
-            })
-          }
           setLoading(false)
           return
         }
@@ -111,14 +66,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       })
       .catch((err) => {
         console.error('Error in getSession:', err)
-        // Логуємо детальну інформацію про помилку мережі
-        if (err.message?.includes('Failed to fetch') || err.code === -102 || err.message?.includes('network')) {
-          console.error('❌ Помилка підключення до Supabase:', {
-            message: err.message,
-            code: err.code,
-            hint: 'Перевірте підключення до інтернету та налаштування Supabase URL'
-          })
-        }
         if (mounted) {
           setLoading(false)
         }
@@ -126,18 +73,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange((event, session) => {
+    } = supabase.auth.onAuthStateChange((_event, session) => {
       if (!mounted) return
-      
-      // Перевіряємо флаг виходу
-      const isLoggingOut = localStorage.getItem('isLoggingOut') === 'true'
-      if (isLoggingOut || event === 'SIGNED_OUT') {
-        setUser(null)
-        setAuthUser(null)
-        setLoading(false)
-        localStorage.removeItem('isLoggingOut')
-        return
-      }
       
       setAuthUser(session?.user ?? null)
       if (session?.user) {
@@ -166,19 +103,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   async function signOut() {
-    // Встановлюємо флаг виходу в localStorage перед очищенням
-    localStorage.setItem('isLoggingOut', 'true')
-    
-    // Спочатку очищаємо локальний стан
-    setUser(null)
-    setAuthUser(null)
-    setLoading(false)
-    
-    // Потім виходимо з Supabase (scope: 'global' для виходу з усіх пристроїв)
-    const { error } = await supabase.auth.signOut({ scope: 'global' })
+    const { error } = await supabase.auth.signOut()
     if (error) {
-      console.error('Error signing out:', error)
-      // Навіть якщо є помилка, стан вже очищено
+      throw error
     }
   }
 

@@ -8,13 +8,18 @@
     "build": "tsc && vite build",
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
     "preview": "vite preview",
-    "check:db": "node scripts/check-tables.mjs"
+    "check:db": "node scripts/check-tables.mjs",
+    "test:performance": "node scripts/test-performance.mjs",
+    "check:indexes": "node scripts/check-indexes.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.88.0",
+    "@tanstack/react-query": "^5.90.12",
+    "@types/react-window": "^2.0.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "react-router-dom": "^6.20.0"
+    "react-router-dom": "^6.20.0",
+    "react-window": "^2.2.3"
   },
   "devDependencies": {
     "@types/react": "^18.2.43",

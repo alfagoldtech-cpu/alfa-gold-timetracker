@@ -6,6 +6,8 @@ import { getClientWithRelations, updateClientStatus } from '../lib/clients'
 import type { ClientWithRelations } from '../types/database'
 import { formatDate, formatCurrency } from '../utils/date'
 import { getStatusBadgeClass, getStatusText } from '../utils/status'
+import TaskPlayer from '../components/TaskPlayer'
+import SkeletonLoader from '../components/SkeletonLoader'
 import './AdminPages.css'
 import './AdminDashboard.css'
 
@@ -106,7 +108,9 @@ export default function ClientViewPage() {
   if (loading) {
     return (
       <div className="admin-page">
-        <div className="loading">Завантаження...</div>
+        <div style={{ padding: '24px' }}>
+          <SkeletonLoader type="card" />
+        </div>
       </div>
     )
   }
@@ -180,7 +184,22 @@ export default function ClientViewPage() {
               <button
                 className="sidebar-nav-item"
                 onClick={() => {
-                  navigate('/dashboard')
+                  navigate('/dashboard?tab=employees')
+                  setSidebarOpen(false)
+                }}
+              >
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
+                  <circle cx="9" cy="7" r="4"></circle>
+                  <path d="M23 21v-2a4 4 0 0 0-3-3.87"></path>
+                  <path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
+                </svg>
+                <span>Співробітники</span>
+              </button>
+              <button
+                className="sidebar-nav-item"
+                onClick={() => {
+                  navigate('/dashboard?tab=clients')
                   setSidebarOpen(false)
                 }}
               >
@@ -191,6 +210,73 @@ export default function ClientViewPage() {
                   <path d="M23 11h-6"></path>
                 </svg>
                 <span>Клієнти</span>
+              </button>
+              <button
+                className="sidebar-nav-item"
+                onClick={() => {
+                  navigate('/dashboard?tab=calendar')
+                  setSidebarOpen(false)
+                }}
+                style={{ display: isTeamLead ? 'none' : 'flex' }}
+              >
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect>
+                  <line x1="16" y1="2" x2="16" y2="6"></line>
+                  <line x1="8" y1="2" x2="8" y2="6"></line>
+                  <line x1="3" y1="10" x2="21" y2="10"></line>
+                </svg>
+                <span>Календар</span>
+              </button>
+              {isTeamLead && (
+                <>
+                  <button
+                    className="sidebar-nav-item"
+                    onClick={() => {
+                      navigate('/dashboard?tab=calendar')
+                      setSidebarOpen(false)
+                    }}
+                  >
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect>
+                      <line x1="16" y1="2" x2="16" y2="6"></line>
+                      <line x1="8" y1="2" x2="8" y2="6"></line>
+                      <line x1="3" y1="10" x2="21" y2="10"></line>
+                    </svg>
+                    <span>Планові задачі</span>
+                  </button>
+                  <button
+                    className="sidebar-nav-item"
+                    onClick={() => {
+                      navigate('/dashboard?tab=task-calendar')
+                      setSidebarOpen(false)
+                    }}
+                  >
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect>
+                      <line x1="16" y1="2" x2="16" y2="6"></line>
+                      <line x1="8" y1="2" x2="8" y2="6"></line>
+                      <line x1="3" y1="10" x2="21" y2="10"></line>
+                      <path d="M8 14h.01M12 14h.01M16 14h.01M8 18h.01M12 18h.01M16 18h.01"></path>
+                    </svg>
+                    <span>Календар задач</span>
+                  </button>
+                </>
+              )}
+              <button
+                className="sidebar-nav-item"
+                onClick={() => {
+                  navigate('/dashboard?tab=my-calendar')
+                  setSidebarOpen(false)
+                }}
+              >
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect>
+                  <line x1="16" y1="2" x2="16" y2="6"></line>
+                  <line x1="8" y1="2" x2="8" y2="6"></line>
+                  <line x1="3" y1="10" x2="21" y2="10"></line>
+                  <path d="M8 14h.01M12 14h.01M16 14h.01M8 18h.01M12 18h.01M16 18h.01"></path>
+                </svg>
+                <span>Мій календар</span>
               </button>
             </nav>
           </div>
@@ -455,6 +541,9 @@ export default function ClientViewPage() {
           </div>
         </div>
       )}
+      
+      {/* Плеер задачі - відображається при активній задачі */}
+      <TaskPlayer />
     </div>
   )
 }

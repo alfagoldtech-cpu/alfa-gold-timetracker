@@ -1,256 +1,191 @@
-import { useEffect } from 'react'
-import { BrowserRouter as Router, Routes, Route, Navigate, useLocation } from 'react-router-dom'
+import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom'
+import { Suspense, lazy } from 'react'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { AuthProvider, useAuth } from './contexts/AuthContext'
 import { ActiveTaskProvider } from './contexts/ActiveTaskContext'
-import { supabase } from './lib/supabase'
-import LoginPage from './pages/LoginPage'
-import ChangePasswordPage from './pages/ChangePasswordPage'
-import ResetPasswordPage from './pages/ResetPasswordPage'
-import AdminDashboard from './pages/AdminDashboard'
-import ManagerDashboard from './pages/ManagerDashboard'
-import ProjectViewPage from './pages/ProjectViewPage'
-import ClientViewPage from './pages/ClientViewPage'
-import EmployeeViewPage from './pages/EmployeeViewPage'
-import MyCalendarPage from './pages/MyCalendarPage'
 import LoadingSpinner from './components/LoadingSpinner'
-import TaskPlayer from './components/TaskPlayer'
+import SkeletonLoader from './components/SkeletonLoader'
+
+// Lazy load великі компоненти
+const LoginPage = lazy(() => import('./pages/LoginPage'))
+const ChangePasswordPage = lazy(() => import('./pages/ChangePasswordPage'))
+const ResetPasswordPage = lazy(() => import('./pages/ResetPasswordPage'))
+const AdminDashboard = lazy(() => import('./pages/AdminDashboard'))
+const ManagerDashboard = lazy(() => import('./pages/ManagerDashboard'))
+const ProjectViewPage = lazy(() => import('./pages/ProjectViewPage'))
+const ClientViewPage = lazy(() => import('./pages/ClientViewPage'))
+const EmployeeViewPage = lazy(() => import('./pages/EmployeeViewPage'))
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
-  const location = useLocation()
-  const { authUser, loading } = useAuth()
-
-  // Зберігаємо поточний URL в sessionStorage при зміні локації
-  useEffect(() => {
-    if (authUser && location.pathname !== '/login' && location.pathname !== '/') {
-      // Зберігаємо поточний URL для можливості повернення після оновлення
-      const currentUrl = location.pathname + location.search
-      sessionStorage.setItem('returnUrl', currentUrl)
-    }
-  }, [location.pathname, location.search, authUser])
-
   try {
-    // Показуємо спінер під час завантаження
+    const { authUser, loading } = useAuth()
+
     if (loading) {
       return <LoadingSpinner />
     }
 
-    // Якщо користувач не авторизований, зберігаємо поточний URL і перенаправляємо на login
     if (!authUser) {
-      // Зберігаємо поточний URL перед перенаправленням на login
-      const currentPath = location.pathname + location.search
-      if (currentPath !== '/login' && currentPath !== '/') {
-        sessionStorage.setItem('returnUrl', currentPath)
-      }
       return <Navigate to="/login" replace />
     }
 
-    // Якщо користувач авторизований, показуємо дочірній компонент
     return <>{children}</>
   } catch (error) {
     console.error('Error in ProtectedRoute:', error)
-    // Зберігаємо поточний URL перед перенаправленням на login
-    const currentPath = location.pathname + location.search
-    if (currentPath !== '/login' && currentPath !== '/') {
-      sessionStorage.setItem('returnUrl', currentPath)
-    }
     return <Navigate to="/login" replace />
   }
 }
 
 function DashboardRoute() {
-  const { user, authUser, loading } = useAuth()
+  const { user, loading } = useAuth()
 
   if (loading) {
     return <LoadingSpinner />
-  }
-
-  // Якщо користувач авторизований, але дані користувача не завантажені
-  if (authUser && !user) {
-    return (
-      <div style={{
-        display: 'flex',
-        flexDirection: 'column',
-        justifyContent: 'center',
-        alignItems: 'center',
-        height: '100vh',
-        padding: '20px',
-        textAlign: 'center'
-      }}>
-        <h1 style={{ color: '#c33', marginBottom: '20px' }}>Помилка завантаження даних</h1>
-        <p style={{ color: '#666', marginBottom: '20px' }}>
-          Не вдалося завантажити дані користувача. Перевірте підключення до бази даних.
-        </p>
-        <button
-          onClick={() => window.location.reload()}
-          style={{
-            padding: '10px 20px',
-            background: '#ff6b35',
-            color: 'white',
-            border: 'none',
-            borderRadius: '8px',
-            cursor: 'pointer'
-          }}
-        >
-          Перезавантажити сторінку
-        </button>
-      </div>
-    )
-  }
-
-  // Якщо користувач не авторизований (не повинно статися через ProtectedRoute, але на всяк випадок)
-  if (!authUser) {
-    return <Navigate to="/login" replace />
   }
 
   // role_id 1 = Адміністратор
   // role_id 2 = Керівник виробництва
   if (user?.role_id === 1) {
-    return <AdminDashboard />
+    return (
+      <Suspense fallback={<SkeletonLoader type="card" />}>
+        <AdminDashboard />
+      </Suspense>
+    )
   } else if (user?.role_id === 2) {
-    return <ManagerDashboard />
+    return (
+      <Suspense fallback={<SkeletonLoader type="card" />}>
+        <ManagerDashboard />
+      </Suspense>
+    )
   }
 
   // Якщо роль не визначена, показуємо дашборд керівника виробництва за замовчуванням
-  return <ManagerDashboard />
+  return (
+    <Suspense fallback={<SkeletonLoader type="card" />}>
+      <ManagerDashboard />
+    </Suspense>
+  )
 }
 
 function LoginRoute() {
-  const { authUser, loading } = useAuth()
-  const searchParams = new URLSearchParams(window.location.search)
-  const isLogout = searchParams.get('logout') === 'true'
-  
-  // Перевіряємо флаг виходу в localStorage
-  const isLoggingOut = localStorage.getItem('isLoggingOut') === 'true'
+  try {
+    const { authUser } = useAuth()
 
-  // Очищаємо сесію при монтуванні, якщо це вихід
-  useEffect(() => {
-    if (isLogout) {
-      // Викликаємо signOut для очищення сесії
-      supabase.auth.signOut({ scope: 'local' }).catch(() => {
-        // Ігноруємо помилки, просто очищаємо storage
-      })
-      // Очищаємо localStorage та sessionStorage
-      localStorage.removeItem('isLoggingOut')
-      // Очищаємо Supabase keys з localStorage
-      Object.keys(localStorage).forEach(key => {
-        if (key.startsWith('sb-')) {
-          localStorage.removeItem(key)
-        }
-      })
-      // Очищаємо sessionStorage
-      sessionStorage.clear()
-      window.history.replaceState({}, '', '/login')
-    }
-    if (isLoggingOut) {
-      localStorage.removeItem('isLoggingOut')
-    }
-  }, [isLogout, isLoggingOut])
-
-  // Якщо це вихід (через URL або localStorage), показуємо сторінку входу
-  if (isLogout || isLoggingOut) {
-    return <LoginPage />
-  }
-
-  // Якщо завантаження, показуємо спінер
-  if (loading) {
-    return <LoadingSpinner />
-  }
-
-  // Якщо користувач авторизований і це не вихід
-  if (authUser) {
-    // Перевіряємо, чи є збережений URL для повернення (з ProtectedRoute)
-    const returnUrl = sessionStorage.getItem('returnUrl')
-    if (returnUrl && returnUrl !== '/login' && returnUrl !== '/dashboard' && returnUrl !== '/') {
-      sessionStorage.removeItem('returnUrl')
-      // Перенаправляємо на збережений URL
-      return <Navigate to={returnUrl} replace />
-    }
-    // Якщо немає збереженого URL або це /login, перенаправляємо на дашборд
-    // Але тільки якщо користувач дійсно на сторінці входу (не редирект)
-    // Перевіряємо, чи це навмисний перехід на /login (немає returnUrl або returnUrl = /login)
-    const isIntentionalLogin = !returnUrl || returnUrl === '/login' || returnUrl === '/'
-    if (isIntentionalLogin) {
-      // Очищаємо returnUrl, якщо він є
-      if (returnUrl) {
-        sessionStorage.removeItem('returnUrl')
-      }
+    if (authUser) {
       return <Navigate to="/dashboard" replace />
     }
-    // Якщо є returnUrl, але він не оброблений вище, залишаємо на login
-    // (це не повинно статися в нормальних умовах)
-  }
 
-  return <LoginPage />
+    return (
+      <Suspense fallback={<LoadingSpinner />}>
+        <LoginPage />
+      </Suspense>
+    )
+  } catch (error) {
+    console.error('Error in LoginRoute:', error)
+    return (
+      <Suspense fallback={<LoadingSpinner />}>
+        <LoginPage />
+      </Suspense>
+    )
+  }
 }
 
 function AppRoutes() {
   return (
-    <Routes>
-      <Route path="/login" element={<LoginRoute />} />
-      <Route path="/reset-password" element={<ResetPasswordPage />} />
-      <Route 
-        path="/change-password" 
-        element={
-          <ProtectedRoute>
-            <ChangePasswordPage />
-          </ProtectedRoute>
-        } 
-      />
-      <Route 
-        path="/dashboard" 
-        element={
-          <ProtectedRoute>
-            <DashboardRoute />
-          </ProtectedRoute>
-        } 
-      />
-      <Route 
-        path="/projects/:id" 
-        element={
-          <ProtectedRoute>
-            <ProjectViewPage />
-          </ProtectedRoute>
-        } 
-      />
-      <Route 
-        path="/clients/:id" 
-        element={
-          <ProtectedRoute>
-            <ClientViewPage />
-          </ProtectedRoute>
-        } 
-      />
-      <Route 
-        path="/employees/:id" 
-        element={
-          <ProtectedRoute>
-            <EmployeeViewPage />
-          </ProtectedRoute>
-        } 
-      />
-      <Route 
-        path="/my-calendar" 
-        element={
-          <ProtectedRoute>
-            <MyCalendarPage />
-          </ProtectedRoute>
-        } 
-      />
-      <Route path="/" element={<Navigate to="/login" replace />} />
-    </Routes>
+    <Suspense fallback={<LoadingSpinner />}>
+      <Routes>
+        <Route 
+          path="/login" 
+          element={
+            <Suspense fallback={<LoadingSpinner />}>
+              <LoginRoute />
+            </Suspense>
+          } 
+        />
+        <Route 
+          path="/reset-password" 
+          element={
+            <Suspense fallback={<LoadingSpinner />}>
+              <ResetPasswordPage />
+            </Suspense>
+          } 
+        />
+        <Route 
+          path="/change-password" 
+          element={
+            <ProtectedRoute>
+              <Suspense fallback={<SkeletonLoader type="card" />}>
+                <ChangePasswordPage />
+              </Suspense>
+            </ProtectedRoute>
+          } 
+        />
+        <Route 
+          path="/dashboard" 
+          element={
+            <ProtectedRoute>
+              <DashboardRoute />
+            </ProtectedRoute>
+          } 
+        />
+        <Route 
+          path="/projects/:id" 
+          element={
+            <ProtectedRoute>
+              <Suspense fallback={<SkeletonLoader type="card" />}>
+                <ProjectViewPage />
+              </Suspense>
+            </ProtectedRoute>
+          } 
+        />
+        <Route 
+          path="/clients/:id" 
+          element={
+            <ProtectedRoute>
+              <Suspense fallback={<SkeletonLoader type="card" />}>
+                <ClientViewPage />
+              </Suspense>
+            </ProtectedRoute>
+          } 
+        />
+        <Route 
+          path="/employees/:id" 
+          element={
+            <ProtectedRoute>
+              <Suspense fallback={<SkeletonLoader type="card" />}>
+                <EmployeeViewPage />
+              </Suspense>
+            </ProtectedRoute>
+          } 
+        />
+        <Route path="/" element={<Navigate to="/login" replace />} />
+      </Routes>
+    </Suspense>
   )
 }
 
+// Налаштування React Query з TTL для різних типів даних
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      staleTime: 1000 * 60, // 1 хвилина за замовчуванням
+      gcTime: 1000 * 60 * 5, // 5 хвилин (раніше cacheTime)
+      retry: 1,
+      refetchOnWindowFocus: false,
+    },
+  },
+})
+
 function App() {
   return (
-    <AuthProvider>
-      <ActiveTaskProvider>
-        <Router>
-          <AppRoutes />
-          <TaskPlayer />
-        </Router>
-      </ActiveTaskProvider>
-    </AuthProvider>
+    <QueryClientProvider client={queryClient}>
+      <AuthProvider>
+        <ActiveTaskProvider>
+          <Router future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+            <AppRoutes />
+          </Router>
+        </ActiveTaskProvider>
+      </AuthProvider>
+    </QueryClientProvider>
   )
 }
 

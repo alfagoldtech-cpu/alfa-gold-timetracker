@@ -13,9 +13,10 @@ export async function getActiveTimeLogForUser(userId: number): Promise<TaskTimeL
     .is('end_time', null)
     .order('start_time', { ascending: false })
     .limit(1)
-    .single()
+    .maybeSingle() // Використовуємо maybeSingle() замість single() для уникнення помилки 406
 
   if (error) {
+    // maybeSingle() повертає null якщо записів немає, але все одно перевіряємо помилки
     if (error.code === 'PGRST116') {
       // Немає записів
       return null
@@ -24,7 +25,7 @@ export async function getActiveTimeLogForUser(userId: number): Promise<TaskTimeL
     return null
   }
 
-  return data
+  return data || null
 }
 
 /**
@@ -39,17 +40,18 @@ export async function getActiveTimeLogForTask(assignedTaskId: number): Promise<T
     .is('end_time', null)
     .order('start_time', { ascending: false })
     .limit(1)
-    .single()
+    .maybeSingle() // Використовуємо maybeSingle() замість single() для уникнення помилки 406
 
   if (error) {
-    if (error.code === 'PGRST116') {
+    // maybeSingle() повертає null якщо записів немає, але все одно перевіряємо помилки
+    if (error.code === 'PGRST116' || error.code === 'PGRST116') {
       return null
     }
     console.error('Error fetching active time log for task:', error)
     return null
   }
 
-  return data
+  return data || null
 }
 
 /**
@@ -205,6 +207,49 @@ export async function stopTaskTimeLog(logId: number): Promise<boolean> {
     console.error('Error stopping task time log:', error)
     console.error('Error details:', JSON.stringify(error, null, 2))
     throw new Error(`Помилка завершення задачі: ${error.message}`)
+  }
+
+  // Оновлюємо assigned_task: встановлюємо статус, дату та час виконання
+  const assignedTaskId = log.data.assigned_task_id
+  if (assignedTaskId) {
+    try {
+      // Невелика затримка, щоб дати час БД оновити лог
+      await new Promise(resolve => setTimeout(resolve, 100))
+      
+      // Отримуємо загальний час виконання (сума всіх логів для цієї задачі)
+      const allLogs = await getTimeLogsForTask(assignedTaskId)
+      const totalMinutes = allLogs
+        .filter(log => log.duration_minutes !== null)
+        .reduce((sum, log) => sum + (log.duration_minutes || 0), 0)
+
+      // Оновлюємо assigned_task
+      const { error: updateError } = await supabase
+        .from('assigned_tasks')
+        .update({
+          task_status: 'completed',
+          completion_date: endTime.toISOString().split('T')[0], // Тільки дата без часу
+          completion_time_minutes: totalMinutes
+        })
+        .eq('id', assignedTaskId)
+
+      if (updateError) {
+        console.error('Error updating assigned task:', updateError)
+        console.error('Update error details:', JSON.stringify(updateError, null, 2))
+        // Не кидаємо помилку, бо лог вже оновлено
+      } else {
+        console.log('Assigned task updated successfully:', {
+          assignedTaskId,
+          task_status: 'completed',
+          completion_date: endTime.toISOString().split('T')[0],
+          completion_time_minutes: totalMinutes
+        })
+      }
+    } catch (err) {
+      console.error('Error updating assigned task after stop:', err)
+      // Не кидаємо помилку, бо лог вже оновлено
+    }
+  } else {
+    console.warn('No assigned_task_id found in log:', log.data)
   }
 
   console.log('Task stopped successfully')

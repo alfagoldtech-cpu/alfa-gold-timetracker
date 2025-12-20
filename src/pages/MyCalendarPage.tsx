@@ -3,70 +3,22 @@ import { useAuth } from '../contexts/AuthContext'
 import { getAssignedTasksForExecutor, createAssignedTask, type AssignedTaskWithDetails } from '../lib/assignedTasks'
 import { createTask } from '../lib/tasks'
 import { getTaskCategoriesByProject } from '../lib/tasksCategory'
-import { getAllClients, getClientWithRelations } from '../lib/clients'
+import { getClientWithRelations } from '../lib/clients'
+import { useClients, useClientsDepartments } from '../hooks/useClients'
 import { getRoleById, getUserDepartments } from '../lib/users'
 import { startTaskTimeLog, resumeTaskTimeLog, getTaskTimeStats } from '../lib/taskTimeLogs'
 import { supabase } from '../lib/supabase'
 import type { TaskCategory, Client, Department } from '../types/database'
 import { useActiveTask } from '../contexts/ActiveTaskContext'
-import { formatDateToUA, formatMinutesToHoursMinutes } from '../utils/date'
+import TaskPlayer from '../components/TaskPlayer'
+import { formatDateToUA, formatMinutesToHoursMinutes, getCurrentWeekMonday, addDays, getWeekDates, getAllDatesInMonth, formatDateKey, isToday } from '../utils/date'
 import { getStatusBadgeClass, getStatusText, getTaskTypeText, getTaskStatus } from '../utils/status'
+import { getActualTaskStatusSync } from '../utils/taskStatus'
+import SkeletonLoader from '../components/SkeletonLoader'
+import { List } from 'react-window'
 import './AdminPages.css'
 import './ManagerDashboard.css'
 
-// Допоміжні функції для роботи з датами (скопійовано з TaskCalendarPage)
-const getCurrentWeekMonday = (): Date => {
-  const today = new Date()
-  const dayOfWeek = today.getDay()
-  const monday = new Date(today)
-  monday.setDate(today.getDate() + (dayOfWeek === 0 ? -6 : 1) - dayOfWeek)
-  monday.setHours(0, 0, 0, 0)
-  return monday
-}
-
-const addDays = (date: Date, days: number): Date => {
-  const result = new Date(date)
-  result.setDate(result.getDate() + days)
-  return result
-}
-
-const getWeekDates = (startDate: Date): Date[] => {
-  const week: Date[] = []
-  for (let i = 0; i < 7; i++) {
-    week.push(addDays(startDate, i))
-  }
-  return week
-}
-
-const getAllDatesInMonth = (date: Date): Date[] => {
-  const year = date.getFullYear()
-  const month = date.getMonth()
-  const firstDay = new Date(year, month, 1)
-  const lastDay = new Date(year, month + 1, 0)
-  const dates: Date[] = []
-  
-  for (let d = new Date(firstDay); d <= lastDay; d.setDate(d.getDate() + 1)) {
-    dates.push(new Date(d))
-  }
-  
-  return dates
-}
-
-const formatDateKey = (date: Date): string => {
-  const year = date.getFullYear()
-  const month = String(date.getMonth() + 1).padStart(2, '0')
-  const day = String(date.getDate()).padStart(2, '0')
-  return `${year}-${month}-${day}`
-}
-
-const isToday = (date: Date): boolean => {
-  const today = new Date()
-  return (
-    date.getDate() === today.getDate() &&
-    date.getMonth() === today.getMonth() &&
-    date.getFullYear() === today.getFullYear()
-  )
-}
 
 const formatWeekRange = (startDate: Date): string => {
   const endDate = addDays(startDate, 6)
@@ -98,6 +50,12 @@ const addMonths = (date: Date, months: number): Date => {
 
 export default function MyCalendarPage() {
   const { user } = useAuth()
+  
+  // Використовуємо React Query хуки для кешування клієнтів
+  const { data: allClients = [], isLoading: clientsLoading } = useClients()
+  const clientIds = allClients.map(client => client.id)
+  const { data: departmentsMap = new Map() } = useClientsDepartments(clientIds)
+  
   const [assignedTasks, setAssignedTasks] = useState<AssignedTaskWithDetails[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -164,56 +122,120 @@ export default function MyCalendarPage() {
     return grouped
   }
 
-  const loadData = async () => {
+  const loadData = async (isMounted: { current: boolean } = { current: true }) => {
     if (!user?.id) {
-      setError('Користувач не знайдено')
-      setLoading(false)
+      if (isMounted.current) {
+        setError('Користувач не знайдено')
+        setLoading(false)
+      }
       return
     }
 
-    setLoading(true)
-    setError(null)
+    if (isMounted.current) {
+      setLoading(true)
+      setError(null)
+    }
 
     try {
-      const tasks = await getAssignedTasksForExecutor(user.id)
+      // Визначаємо діапазон дат для фільтрації
+      let startDate: Date | undefined
+      let endDate: Date | undefined
+      
+      if (showFullMonth) {
+        // Для місяця: перший і останній день місяця
+        startDate = new Date(currentMonth.getFullYear(), currentMonth.getMonth(), 1)
+        endDate = new Date(currentMonth.getFullYear(), currentMonth.getMonth() + 1, 0)
+      } else {
+        // Для тижня: понеділок і неділя
+        startDate = currentWeekStart
+        endDate = addDays(currentWeekStart, 6)
+      }
+      
+      const tasks = await getAssignedTasksForExecutor(user.id, startDate, endDate)
+      
+      // Діагностичне логування
+      console.log('Loaded tasks:', tasks.length)
+      const completedTasks = tasks.filter(t => t.task_status === 'completed')
+      console.log('Completed tasks:', completedTasks.length)
+      if (completedTasks.length > 0) {
+        console.log('Sample completed task:', {
+          id: completedTasks[0].id,
+          task_status: completedTasks[0].task_status,
+          completion_date: completedTasks[0].completion_date,
+          completion_time_minutes: completedTasks[0].completion_time_minutes
+        })
+      }
+      
+      // Перевіряємо монтування перед встановленням стану
+      if (!isMounted.current) return
+      
       setAssignedTasks(tasks)
       
       // Завантажуємо статистику часу для кожної задачі
+      // Тепер tasks вже відфільтровані по періоду на рівні запиту, тому використовуємо всі
+      const visibleTasks = tasks
+      
       const statsMap = new Map<number, { totalMinutes: number; status: string | null; completionDate: string | null }>()
-      await Promise.all(
-        tasks.map(async (task) => {
+      
+      // Використовуємо Promise.allSettled для обробки помилок
+      const statsResults = await Promise.allSettled(
+        visibleTasks.map(async (task) => {
+          if (!isMounted.current) return null
+          
           try {
             const stats = await getTaskTimeStats(task.id)
-            console.log(`Stats for task ${task.id}:`, stats)
-            statsMap.set(task.id, {
+            return { taskId: task.id, stats }
+          } catch (err) {
+            console.error(`Error loading stats for task ${task.id}:`, err)
+            return { taskId: task.id, stats: null }
+          }
+        })
+      )
+      
+      // Обробляємо результати
+      statsResults.forEach((result) => {
+        if (!isMounted.current) return
+        if (result.status === 'fulfilled' && result.value) {
+          const { taskId, stats } = result.value
+          if (stats) {
+            statsMap.set(taskId, {
               totalMinutes: stats.totalMinutes,
               status: stats.status,
               completionDate: stats.completionDate
             })
-          } catch (err) {
-            console.error(`Error loading stats for task ${task.id}:`, err)
-            // Якщо помилка, встановлюємо null статус
-            statsMap.set(task.id, {
+          } else {
+            statsMap.set(taskId, {
               totalMinutes: 0,
               status: null,
               completionDate: null
             })
           }
-        })
-      )
-      console.log('Loaded task stats:', Array.from(statsMap.entries()))
-      setTaskTimeStats(statsMap)
+        }
+      })
+      
+      if (isMounted.current) {
+        setTaskTimeStats(statsMap)
+      }
     } catch (err) {
       console.error('Error loading assigned tasks:', err)
-      setError('Не вдалося завантажити задачі')
+      if (isMounted.current) {
+        setError('Не вдалося завантажити задачі')
+      }
     } finally {
-      setLoading(false)
+      if (isMounted.current) {
+        setLoading(false)
+      }
     }
   }
 
   useEffect(() => {
-    loadData()
-  }, [user?.id])
+    const isMounted = { current: true }
+    loadData(isMounted)
+    
+    return () => {
+      isMounted.current = false
+    }
+  }, [user?.id, currentWeekStart, currentMonth, showFullMonth])
 
   // Зберігаємо попередній activeTaskId для виявлення зупинки
   const prevActiveTaskIdRef = useRef<number | null>(null)
@@ -301,37 +323,21 @@ export default function MyCalendarPage() {
           teamLeadDepts = await getUserDepartments(user.id)
         }
 
-        // Завантажуємо категорії та всіх клієнтів
-        const [categories, allClients] = await Promise.all([
-          getTaskCategoriesByProject(user.project_id),
-          getAllClients()
-        ])
+        // Завантажуємо категорії (клієнти вже завантажені через React Query хуки)
+        const categories = await getTaskCategoriesByProject(user.project_id)
         
         setTaskCategories(categories)
         
-        // Для тім ліда фільтруємо клієнтів за відділами
+        // Для тім ліда фільтруємо клієнтів за відділами (використовуємо дані з кешу)
         let filteredClients = allClients
         if (isTeamLeadRole && teamLeadDepts.length > 0) {
           const teamLeadDeptIds = teamLeadDepts.map(dept => dept.id)
           
-          // Завантажуємо відділи для кожного клієнта та фільтруємо
-          const clientsWithDepartments = await Promise.all(
-            allClients.map(async (client) => {
-              try {
-                const clientWithRelations = await getClientWithRelations(client.id)
-                return {
-                  ...client,
-                  departments: clientWithRelations?.departments || []
-                }
-              } catch (err) {
-                console.warn(`Помилка завантаження відділів для клієнта ${client.id}:`, err)
-                return {
-                  ...client,
-                  departments: []
-                }
-              }
-            })
-          )
+          // Додаємо відділи до клієнтів (використовуємо дані з кешу)
+          const clientsWithDepartments = allClients.map(client => ({
+            ...client,
+            departments: departmentsMap.get(client.id) || []
+          }))
           
           // Фільтруємо клієнтів за відділами тім ліда
           filteredClients = clientsWithDepartments.filter(client => {
@@ -547,7 +553,8 @@ export default function MyCalendarPage() {
   const filteredTasks = useMemo(() => {
     return assignedTasks.filter(task => {
       if (statusFilter) {
-        const taskStatus = getTaskStatus(task)
+        const taskStats = taskTimeStats.get(task.id)
+        const taskStatus = getActualTaskStatusSync(task, activeTaskId, taskStats || undefined)
         if (taskStatus !== statusFilter) return false
       }
       if (taskTypeFilter && task.task?.task_type !== taskTypeFilter) return false
@@ -628,11 +635,12 @@ export default function MyCalendarPage() {
   const uniqueStatuses = useMemo(() => {
     const statuses = new Set<string>()
     assignedTasks.forEach(task => {
-      const status = getTaskStatus(task)
+      const taskStats = taskTimeStats.get(task.id)
+      const status = getActualTaskStatusSync(task, activeTaskId, taskStats || undefined)
       statuses.add(status)
     })
     return Array.from(statuses)
-  }, [assignedTasks])
+  }, [assignedTasks, activeTaskId, taskTimeStats])
 
   // Отримуємо унікальні типи задач для фільтра
   const uniqueTaskTypes = useMemo(() => {
@@ -655,7 +663,12 @@ export default function MyCalendarPage() {
   if (loading) {
     return (
       <div className="admin-page">
-        <div className="loading">Завантаження...</div>
+        <div style={{ padding: '24px' }}>
+          <SkeletonLoader type="card" />
+          <div style={{ marginTop: '24px' }}>
+            <SkeletonLoader type="list" rows={5} />
+          </div>
+        </div>
       </div>
     )
   }
@@ -1026,14 +1039,56 @@ export default function MyCalendarPage() {
                       </div>
                     ) : (
                       <>
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                        {tasksToShow.length > 50 ? (
+                          // Використовуємо віртуалізацію для великих списків (>50 записів)
+                          <div style={{ width: '100%' }}>
+                            <List
+                              height={Math.min(600, tasksToShow.length * 200)} // Максимальна висота 600px або висота всіх рядків
+                              itemCount={tasksToShow.length}
+                              itemSize={200} // Орієнтовна висота однієї картки задачі
+                              width="100%"
+                            >
+                              {({ index, style }: { index: number; style: React.CSSProperties }) => (
+                                <div style={style}>
+                                  <VirtualizedTaskRowMyCalendar
+                                    task={tasksToShow[index]}
+                                    taskTimeStats={taskTimeStats}
+                                    activeTaskId={activeTaskId}
+                                    activeTimeLog={activeTimeLog}
+                                    formatDateToUA={formatDateToUA}
+                                    formatMinutesToHoursMinutes={formatMinutesToHoursMinutes}
+                                    getStatusBadgeClass={getStatusBadgeClass}
+                                    getStatusText={getStatusText}
+                                    getTaskTypeText={getTaskTypeText}
+                                    getActualTaskStatusSync={getActualTaskStatusSync}
+                                  />
+                                </div>
+                              )}
+                            </List>
+                          </div>
+                        ) : (
+                          // Для малих списків використовуємо звичайний рендеринг
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
                           {tasksToShow.map(task => {
                             const clientName = task.client?.legal_name || 'Не вказано'
                             const stats = taskTimeStats.get(task.id)
-                            const completionDate = stats?.completionDate 
-                              ? formatDateToUA(stats.completionDate)
-                              : (task.completion_date 
-                                ? formatDateToUA(task.completion_date.split('T')[0])
+                            
+                            // Діагностичне логування для першої задачі
+                            if (tasksToShow.indexOf(task) === 0) {
+                              console.log('Rendering task:', {
+                                id: task.id,
+                                task_status: task.task_status,
+                                completion_date: task.completion_date,
+                                completion_time_minutes: task.completion_time_minutes,
+                                stats: stats
+                              })
+                            }
+                            
+                            // Пріоритет: completion_date з БД, потім зі статистики
+                            const completionDate = task.completion_date
+                              ? formatDateToUA(task.completion_date.split('T')[0])
+                              : (stats?.completionDate 
+                                ? formatDateToUA(stats.completionDate)
                                 : '-')
                             // Використовуємо час зі статистики (з логів), якщо він є, інакше з поля задачі
                             // Для активної задачі використовуємо поточний час
@@ -1048,19 +1103,8 @@ export default function MyCalendarPage() {
                               totalMinutes = previousMinutes + currentMinutes
                             }
                             const timeSpent = formatMinutesToHoursMinutes(totalMinutes)
-                            // Використовуємо статус зі статистики (з логів), якщо він є, інакше автоматичне визначення
-                            // Для активної задачі завжди показуємо "in_progress"
-                            let status: string
-                            if (activeTaskId === task.id && activeTimeLog) {
-                              // Активна задача - завжди "in_progress"
-                              status = 'in_progress'
-                            } else if (stats?.status) {
-                              // Використовуємо статус зі статистики (з логів)
-                              status = stats.status
-                            } else {
-                              // Автоматичне визначення
-                              status = getTaskStatus(task)
-                            }
+                            // Використовуємо уніфіковану логіку визначення статусу
+                            const status = getActualTaskStatusSync(task, activeTaskId, stats)
                             const taskName = task.task?.task_name || `Задача #${task.task_id}`
                             const taskType = task.task?.task_type || 'Планова задача'
 
@@ -1113,8 +1157,8 @@ export default function MyCalendarPage() {
                                     </span>
                                     {/* Кнопки управління часом */}
                                     {(() => {
-                                      // Використовуємо статус зі статистики (з логів), якщо він є
-                                      const taskStatus = stats?.status || getTaskStatus(task)
+                                      // Використовуємо уніфіковану логіку визначення статусу
+                                      const taskStatus = getActualTaskStatusSync(task, activeTaskId, stats)
                                       const isActive = activeTaskId === task.id
                                       const isPaused = taskStatus === 'paused'
                                       const isCompleted = taskStatus === 'completed'
@@ -1313,6 +1357,7 @@ export default function MyCalendarPage() {
                             )
                           })}
                         </div>
+                        )}
 
                         {/* Кнопка "Показати всі задачі" */}
                         {hasMoreTasks && (
@@ -1505,6 +1550,146 @@ export default function MyCalendarPage() {
               </div>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Плеер таймера */}
+      <TaskPlayer />
+    </div>
+  )
+}
+
+// Компонент для віртуалізованого рядка задачі в MyCalendarPage
+function VirtualizedTaskRowMyCalendar({
+  task,
+  taskTimeStats,
+  activeTaskId,
+  activeTimeLog,
+  formatDateToUA,
+  formatMinutesToHoursMinutes,
+  getStatusBadgeClass,
+  getStatusText,
+  getTaskTypeText,
+  getActualTaskStatusSync
+}: {
+  task: AssignedTaskWithDetails
+  taskTimeStats: Map<number, { totalMinutes: number; status: string | null; completionDate: string | null }>
+  activeTaskId: number | null
+  activeTimeLog: { id: number; start_time: string } | null
+  formatDateToUA: (date: string) => string
+  formatMinutesToHoursMinutes: (minutes: number) => string
+  getStatusBadgeClass: (status?: string) => string
+  getStatusText: (status?: string) => string
+  getTaskTypeText: (type?: string) => string
+  getActualTaskStatusSync: (task: AssignedTaskWithDetails, activeTaskId: number | null, stats?: { completionDate?: string, totalMinutes?: number }) => string
+}) {
+  const clientName = task.client?.legal_name || 'Не вказано'
+  const stats = taskTimeStats.get(task.id)
+  
+  const completionDate = task.completion_date
+    ? formatDateToUA(task.completion_date.split('T')[0])
+    : (stats?.completionDate 
+      ? formatDateToUA(stats.completionDate)
+      : '-')
+  
+  let totalMinutes = stats?.totalMinutes ?? task.completion_time_minutes ?? 0
+  if (activeTaskId === task.id && activeTimeLog) {
+    const startTime = new Date(activeTimeLog.start_time)
+    const now = new Date()
+    const currentMinutes = Math.floor((now.getTime() - startTime.getTime()) / (1000 * 60))
+    const previousMinutes = stats?.totalMinutes ?? 0
+    totalMinutes = previousMinutes + currentMinutes
+  }
+  const timeSpent = formatMinutesToHoursMinutes(totalMinutes)
+  const status = getActualTaskStatusSync(task, activeTaskId, stats)
+  const taskName = task.task?.task_name || `Задача #${task.task_id}`
+  const taskType = task.task?.task_type || 'Планова задача'
+
+  return (
+    <div
+      style={{
+        padding: '16px',
+        marginBottom: '12px',
+        background: task.is_active ? '#f7fafc' : '#f0f0f0',
+        borderRadius: '6px',
+        border: `1px solid ${task.is_active ? '#e2e8f0' : '#d0d0d0'}`,
+        opacity: task.is_active ? 1 : 0.7
+      }}
+    >
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '12px' }}>
+        <div style={{ flex: 1 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px', flexWrap: 'wrap' }}>
+            <h4 style={{ 
+              fontSize: '16px', 
+              fontWeight: '600', 
+              color: task.is_active ? '#2d3748' : '#a0aec0',
+              margin: 0
+            }}>
+              {taskName}
+            </h4>
+            <span style={{
+              padding: '4px 10px',
+              borderRadius: '12px',
+              fontSize: '11px',
+              fontWeight: '600',
+              background: '#e6f3ff',
+              color: '#2c5282',
+              textTransform: 'uppercase',
+              letterSpacing: '0.5px'
+            }}>
+              {getTaskTypeText(taskType)}
+            </span>
+          </div>
+          <p style={{ 
+            fontSize: '14px', 
+            color: task.is_active ? '#718096' : '#a0aec0',
+            marginBottom: '4px'
+          }}>
+            Клієнт: <span style={{ fontWeight: '500', color: task.is_active ? '#4a5568' : '#a0aec0' }}>{clientName}</span>
+          </p>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+          <span className={`status-badge ${getStatusBadgeClass(status)}`}>
+            {getStatusText(status)}
+          </span>
+        </div>
+      </div>
+
+      <div style={{ 
+        display: 'grid', 
+        gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', 
+        gap: '12px',
+        marginTop: '12px'
+      }}>
+        {(stats?.completionDate || task.completion_date) && (
+          <div>
+            <span style={{ fontSize: '12px', color: '#718096', display: 'block', marginBottom: '4px' }}>
+              Дата виконання
+            </span>
+            <span style={{ fontSize: '14px', color: '#2d3748', fontWeight: '500' }}>
+              {completionDate}
+            </span>
+          </div>
+        )}
+        
+        <div>
+          <span style={{ fontSize: '12px', color: '#718096', display: 'block', marginBottom: '4px' }}>
+            Час виконання
+          </span>
+          <span style={{ fontSize: '14px', color: '#2d3748', fontWeight: '500' }}>
+            {timeSpent}
+          </span>
+        </div>
+      </div>
+
+      {task.task?.description && (
+        <div style={{ marginTop: '12px', paddingTop: '12px', borderTop: '1px solid #e2e8f0' }}>
+          <span style={{ fontSize: '12px', color: '#718096', display: 'block', marginBottom: '4px' }}>
+            Опис
+          </span>
+          <p style={{ fontSize: '14px', color: '#4a5568', lineHeight: '1.5' }}>
+            {task.task.description}
+          </p>
         </div>
       )}
     </div>

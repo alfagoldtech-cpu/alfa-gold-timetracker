@@ -21,3 +21,4 @@ CREATE TRIGGER update_tasks_category_updated_at
 
 
 
+

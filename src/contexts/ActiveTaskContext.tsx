@@ -1,7 +1,7 @@
-import { createContext, useContext, useState, useEffect, ReactNode } from 'react'
+import { createContext, useContext, useState, useEffect, useCallback, useRef, ReactNode } from 'react'
 import { useAuth } from './AuthContext'
 import { getActiveTimeLogForUser, pauseTaskTimeLog, stopTaskTimeLog, getTaskTimeStats } from '../lib/taskTimeLogs'
-import { getAssignedTasksForExecutor, type AssignedTaskWithDetails } from '../lib/assignedTasks'
+import { getAssignedTasksForExecutor, getAssignedTaskById, type AssignedTaskWithDetails } from '../lib/assignedTasks'
 import { supabase } from '../lib/supabase'
 import type { TaskTimeLog } from '../types/database'
 
@@ -24,27 +24,42 @@ export function ActiveTaskProvider({ children }: { children: ReactNode }) {
   const [activeTaskId, setActiveTaskId] = useState<number | null>(null)
   const [activeTask, setActiveTask] = useState<AssignedTaskWithDetails | null>(null)
   const [elapsedTime, setElapsedTime] = useState<number>(0)
+  
+  // Refs для захисту від race conditions та перевірки монтування
+  const isMountedRef = useRef(true)
+  const loadingRef = useRef(false)
 
-  // Функція для завантаження активного логу часу
-  const loadActiveTimeLog = async () => {
-    if (!user?.id) {
-      setActiveTimeLog(null)
-      setActiveTaskId(null)
-      setActiveTask(null)
-      setElapsedTime(0)
+  // Мемоізована функція для завантаження активного логу часу
+  const loadActiveTimeLog = useCallback(async () => {
+    if (!user?.id || loadingRef.current) {
+      if (!user?.id) {
+        setActiveTimeLog(null)
+        setActiveTaskId(null)
+        setActiveTask(null)
+        setElapsedTime(0)
+      }
       return
     }
     
+    loadingRef.current = true
+    
     try {
       const log = await getActiveTimeLogForUser(user.id)
+      
+      // Перевіряємо, чи компонент ще змонтований
+      if (!isMountedRef.current) return
+      
       if (log) {
         setActiveTimeLog(log)
         setActiveTaskId(log.assigned_task_id)
         
-        // Завантажуємо інформацію про задачу
-        const tasks = await getAssignedTasksForExecutor(user.id)
-        const task = tasks.find(t => t.id === log.assigned_task_id)
-        setActiveTask(task || null)
+        // Завантажуємо інформацію про задачу безпосередньо за ID
+        const task = await getAssignedTaskById(log.assigned_task_id)
+        
+        // Знову перевіряємо монтування після асинхронної операції
+        if (!isMountedRef.current) return
+        
+        setActiveTask(task)
         
         // Розраховуємо поточний час виконання
         const startTime = new Date(log.start_time)
@@ -59,20 +74,35 @@ export function ActiveTaskProvider({ children }: { children: ReactNode }) {
       }
     } catch (err) {
       console.error('Error loading active time log:', err)
-      setActiveTimeLog(null)
-      setActiveTaskId(null)
-      setActiveTask(null)
-      setElapsedTime(0)
+      if (isMountedRef.current) {
+        setActiveTimeLog(null)
+        setActiveTaskId(null)
+        setActiveTask(null)
+        setElapsedTime(0)
+      }
+    } finally {
+      if (isMountedRef.current) {
+        loadingRef.current = false
+      }
     }
-  }
+  }, [user?.id])
 
-  // Завантажуємо активний лог часу
+  // Завантажуємо активний лог часу при зміні користувача
   useEffect(() => {
+    isMountedRef.current = true
     loadActiveTimeLog()
     
-    // Оновлюємо час кожну секунду, якщо є активна задача
+    return () => {
+      isMountedRef.current = false
+    }
+  }, [loadActiveTimeLog])
+
+  // Окремий useEffect для оновлення часу кожну секунду
+  useEffect(() => {
+    if (!activeTimeLog) return
+    
     const interval = setInterval(() => {
-      if (activeTimeLog) {
+      if (activeTimeLog && isMountedRef.current) {
         const startTime = new Date(activeTimeLog.start_time)
         const now = new Date()
         const elapsed = Math.floor((now.getTime() - startTime.getTime()) / 1000)
@@ -81,13 +111,14 @@ export function ActiveTaskProvider({ children }: { children: ReactNode }) {
     }, 1000)
     
     return () => clearInterval(interval)
-  }, [user?.id, activeTimeLog?.start_time])
+  }, [activeTimeLog?.id, activeTimeLog?.start_time]) // Залежність тільки від ID та start_time, не викликає циклів
 
-  const handlePauseTask = async (logId: number) => {
+  // Мемоізована функція для паузи задачі
+  const handlePauseTask = useCallback(async (logId: number) => {
     try {
       const success = await pauseTaskTimeLog(logId)
       
-      if (success) {
+      if (success && isMountedRef.current) {
         // Перезавантажуємо активний лог, щоб переконатися, що він оновився
         await loadActiveTimeLog()
       }
@@ -95,13 +126,14 @@ export function ActiveTaskProvider({ children }: { children: ReactNode }) {
       console.error('Error pausing task:', err)
       throw err
     }
-  }
+  }, [loadActiveTimeLog])
 
-  const handleStopTask = async (logId: number) => {
+  // Мемоізована функція для зупинки задачі
+  const handleStopTask = useCallback(async (logId: number) => {
     try {
       const success = await stopTaskTimeLog(logId)
       
-      if (success) {
+      if (success && isMountedRef.current) {
         // Перезавантажуємо активний лог, щоб переконатися, що його більше немає
         await loadActiveTimeLog()
       }
@@ -109,19 +141,21 @@ export function ActiveTaskProvider({ children }: { children: ReactNode }) {
       console.error('Error stopping task:', err)
       throw err
     }
-  }
+  }, [loadActiveTimeLog])
 
-  const refreshActiveTask = async () => {
-    if (!user?.id || !activeTaskId) return
+  // Мемоізована функція для оновлення інформації про задачу
+  const refreshActiveTask = useCallback(async () => {
+    if (!user?.id || !activeTaskId || !isMountedRef.current) return
     
     try {
-      const tasks = await getAssignedTasksForExecutor(user.id)
-      const task = tasks.find(t => t.id === activeTaskId)
-      setActiveTask(task || null)
+      const task = await getAssignedTaskById(activeTaskId)
+      if (isMountedRef.current) {
+        setActiveTask(task)
+      }
     } catch (err) {
       console.error('Error refreshing active task:', err)
     }
-  }
+  }, [user?.id, activeTaskId])
 
   return (
     <ActiveTaskContext.Provider

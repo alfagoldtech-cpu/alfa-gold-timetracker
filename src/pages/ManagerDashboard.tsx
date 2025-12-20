@@ -7,6 +7,7 @@ import ClientsPage from './ClientsPage'
 import CalendarPage from './CalendarPage'
 import TaskCalendarPage from './TaskCalendarPage'
 import MyCalendarPage from './MyCalendarPage'
+import TaskPlayer from '../components/TaskPlayer'
 import './ManagerDashboard.css'
 import './AdminDashboard.css'
 
@@ -240,6 +241,9 @@ export default function ManagerDashboard() {
           {activeTab === 'my-calendar' && <MyCalendarPage />}
         </div>
       </div>
+      
+      {/* Плеер задачі - відображається на всіх сторінках при активній задачі */}
+      <TaskPlayer />
     </div>
   )
 }

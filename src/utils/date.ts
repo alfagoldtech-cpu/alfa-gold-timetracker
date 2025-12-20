@@ -114,3 +114,87 @@ export function formatMinutesToHoursMinutes(minutes: number | null | undefined):
   return `${hours} г. ${mins} хв.`
 }
 
+/**
+ * Отримує понеділок поточного тижня
+ */
+export function getCurrentWeekMonday(): Date {
+  const today = new Date()
+  const dayOfWeek = today.getDay()
+  const monday = new Date(today)
+  monday.setDate(today.getDate() + (dayOfWeek === 0 ? -6 : 1) - dayOfWeek)
+  monday.setHours(0, 0, 0, 0)
+  return monday
+}
+
+/**
+ * Додає дні до дати
+ */
+export function addDays(date: Date, days: number): Date {
+  const result = new Date(date)
+  result.setDate(result.getDate() + days)
+  return result
+}
+
+/**
+ * Отримує всі дати тижня, починаючи з понеділка
+ */
+export function getWeekDates(startDate: Date): Date[] {
+  const week: Date[] = []
+  for (let i = 0; i < 7; i++) {
+    week.push(addDays(startDate, i))
+  }
+  return week
+}
+
+/**
+ * Отримує всі дати місяця
+ */
+export function getAllDatesInMonth(date: Date): Date[] {
+  const year = date.getFullYear()
+  const month = date.getMonth()
+  const firstDay = new Date(year, month, 1)
+  const lastDay = new Date(year, month + 1, 0)
+  const dates: Date[] = []
+  
+  for (let d = new Date(firstDay); d <= lastDay; d.setDate(d.getDate() + 1)) {
+    dates.push(new Date(d))
+  }
+  
+  return dates
+}
+
+/**
+ * Форматує дату у ключ формату YYYY-MM-DD
+ */
+export function formatDateKey(date: Date): string {
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+/**
+ * Перевіряє, чи дата є сьогоднішньою
+ */
+export function isToday(date: Date): boolean {
+  const today = new Date()
+  return (
+    date.getDate() === today.getDate() &&
+    date.getMonth() === today.getMonth() &&
+    date.getFullYear() === today.getFullYear()
+  )
+}
+
+/**
+ * Форматує місяць та рік українською мовою
+ * @param date - Дата
+ * @returns Рядок формату "Місяць Рік р."
+ */
+export function formatMonthYear(date: Date): string {
+  const months = [
+    'січень', 'лютий', 'березень', 'квітень', 'травень', 'червень',
+    'липень', 'серпень', 'вересень', 'жовтень', 'листопад', 'грудень'
+  ]
+  return `${months[date.getMonth()]} ${date.getFullYear()} р.`
+}
+

@@ -16,6 +16,8 @@ import {
 import type { Task, TaskCategory } from '../types/database'
 import { formatDate, parseDateToISO, formatDateToUA } from '../utils/date'
 import { getTaskTypeText } from '../utils/status'
+import { getBaseTaskName } from '../utils/task'
+import TaskPlayer from '../components/TaskPlayer'
 import './AdminPages.css'
 import './ManagerDashboard.css'
 
@@ -352,17 +354,6 @@ export default function CalendarPage() {
   }
 
   // Функція для витягування базової назви задачі (без суфіксів типу " - Січень")
-  const getBaseTaskName = (taskName: string): string => {
-    // Видаляємо суфікси типу " - Січень", " - 1 квартал" тощо
-    const monthPattern = / - (Січень|Лютий|Березень|Квітень|Травень|Червень|Липень|Серпень|Вересень|Жовтень|Листопад|Грудень)$/
-    const quarterPattern = / - \d+ квартал$/
-    
-    let baseName = taskName
-    baseName = baseName.replace(monthPattern, '')
-    baseName = baseName.replace(quarterPattern, '')
-    
-    return baseName.trim()
-  }
 
   // Групуємо задачі по базовій назві
   const groupTasksByName = (tasks: Task[]): Map<string, Task[]> => {
@@ -1811,6 +1802,9 @@ export default function CalendarPage() {
           />
         </div>
       )}
+      
+      {/* Плеер задачі - відображається при активній задачі */}
+      <TaskPlayer />
     </div>
   )
 }

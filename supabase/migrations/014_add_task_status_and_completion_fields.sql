@@ -25,3 +25,4 @@ COMMENT ON COLUMN assigned_tasks.completion_time_minutes IS 'Час викона
 
 
 
+
